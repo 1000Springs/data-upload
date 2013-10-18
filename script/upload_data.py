@@ -245,7 +245,7 @@ def process_sample_files(db_conn, files_to_process):
         except Exception as e:
             log.error('Error processing sample file ' + sample_file)
             log.exception(e)
-            files_error.append(feature_file)
+            files_error.append(sample_file)
 
     return files_uploaded, files_error
 
@@ -286,7 +286,7 @@ def get_sample_insert_sql(db_conn, row, sample):
             # sample row is inserted
             sql = 'insert into sample (phys_id,' + ','.join(column_names) + ',location_id) values (last_insert_id(),'+ ('%s,'*len(values)) +'%s)'
             values.append(feature_id)
-        elif 'phys_id' in sample:
+        elif sample['phys_id'] != None:
             # sample and physical data records already exist, perform update
             sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, location_id=%s where id=%s'
             values.append(feature_id)
@@ -300,7 +300,7 @@ def get_sample_insert_sql(db_conn, row, sample):
     else:
         if sample == None:
             sql = 'insert into sample (phys_id,' + ','.join(column_names) + ') values (last_insert_id(),'+ ('%s,'*(len(values) - 1)) +'%s)'
-        elif 'phys_id' in sample:
+        elif sample['phys_id'] != None:
             sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s where id=%s'
             values.append(sample['id'])
         else:
@@ -346,7 +346,7 @@ def get_physical_data_insert_sql(db_conn, row):
 
     column_names, values = get_column_names_and_values(row, SAMPLE_TO_PHYSICAL_COLUMN_MAP)
     sample = get_sample(db_conn, row['SampleNumber'])
-    if (sample != None and 'phys_id' in sample):
+    if (sample != None and sample['phys_id']):
         sql = 'update physical_data set ' + '=%s,'.join(column_names) + '=%s where id=%s'
         values.append(sample['phys_id'])
     else:
@@ -451,10 +451,12 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
                  s3_bucket, s3_folder, s3_bucket_url,
                  files_uploaded, files_error):
 
-    log.info('Processing image file ' + image_file)
-    # reduce image size
-    reduced_image_file = reduce_image(working_dir, image_file)
+    reduced_image_file = None
+    key = None
     try:
+        log.info('Processing image file ' + image_file)
+         # reduce image size
+        reduced_image_file = reduce_image(working_dir, image_file)
         # upload reduced image to Amazon S3 bucket
         key = Key(s3_bucket)
         key.key = '/'.join([s3_folder, os.path.basename(image_file)])
@@ -479,7 +481,8 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
             key.delete()
 
     finally:
-        os.remove(reduced_image_file)
+        if reduced_image_file != None:
+            os.remove(reduced_image_file)
 
 
 # sample_id: sample.id of the sample the image is associated with.
@@ -585,13 +588,13 @@ def process_geochem_worksheet(db_conn, worksheet, file_name):
                 # if the concentration is less than the detection limit.
                 # Values below the detection limit are recorded as negative
                 # numbers in the database, e.g '<0.2' is recorded as '-0.2'
-                result = worksheet.cell_value(row_index, col_index)
+                result = str(worksheet.cell_value(row_index, col_index))
                 if NUMERIC_RE.match(result):
                     row_data[parameter_name] = result
                 else:
                     bdl = BELOW_DETECTION_LIMIT_RE.match(result)
                     if bdl:
-                        row_data[parameter_name] = '-' + result
+                        row_data[parameter_name] = '-' + bdl.group(1)
                     else:
                         raise Exception(
                             'Unexpected result value "'+result+'" for sample '
@@ -615,7 +618,7 @@ def process_geochem_worksheet(db_conn, worksheet, file_name):
 
             if sample != None:
                 update_data['sample_id'] = sample['id']
-                if 'chem_id' in sample:
+                if sample['chem_id'] != None:
                     update_data['chem_id'] = sample['chem_id']
 
             geochem_updates.append(update_data)
@@ -715,7 +718,7 @@ def add_upload_summary(file_type, files_uploaded, files_error, files_skipped):
         add_file_list(indent*2, files_error)
 
     if len(files_skipped) > 0:
-        add_to_notification(indent + 'Files skipped due to unrecognized format: '+ str(len(files_skipped)))
+        add_to_notification(indent + 'Files skipped due to unrecognized format or unmatched identifier: '+ str(len(files_skipped)))
         add_file_list(indent*2, files_skipped)
 
 
