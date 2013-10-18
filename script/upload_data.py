@@ -26,12 +26,15 @@ from boto.s3.key import Key
 import xlrd
 
 log = logging.getLogger('Springs Uploader')
+notification_msg = '1000 Springs data upload results:'
+new_files_dir = None
 
 def main():
 
     upload_error = False
     db_conn = None
     log_file = None
+    global new_files_dir
     try:
         config = load_config('upload_data.cfg')
         log_file = init_logging(config)
@@ -40,10 +43,22 @@ def main():
         new_files_dir = get_new_files_dir(config)
         feature_files, sample_files, image_files, other_xls_files = find_files(new_files_dir)
 
-        process_feature_files(db_conn, feature_files)
-        process_sample_files(db_conn, sample_files)
-        process_image_files(config, db_conn, image_files)
-        process_geochem_files(db_conn, other_xls_files)
+        f_files_uploaded, f_files_error = process_feature_files(db_conn, feature_files)
+        add_upload_summary('Feature',  f_files_uploaded, f_files_error, [])
+
+        s_files_uploaded, s_files_error =  process_sample_files(db_conn, sample_files)
+        add_upload_summary('Sample', s_files_uploaded, s_files_error, [])
+
+        i_files_uploaded, i_files_error, i_files_skipped, i_files_to_archive = process_image_files(config, db_conn, image_files)
+        add_upload_summary('Image',  i_files_uploaded, i_files_error, i_files_skipped)
+
+        g_files_uploaded, g_files_error, g_files_skipped = process_geochem_files(db_conn, other_xls_files)
+        add_upload_summary('Geochemistry', g_files_uploaded, g_files_error, g_files_skipped)
+
+        move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded, get_archive_dir(config))
+        move_files(f_files_error + s_files_error + i_files_error + g_files_error, get_error_dir(config))
+
+        send_upload_notification(config)
 
         unmount_data_share(config)
 
@@ -51,10 +66,11 @@ def main():
         upload_error = True
         log.exception(e)
 
+
     finally:
-        if upload_error and log_file is not None and config is not None:
+        if config is not None and upload_error:
             log.info('Sending error notification')
-            #send_error_notification(log_file.baseFilename, config)
+            send_error_notification(log_file.baseFilename, config)
 
         log.info('upload_tablet_data.py exiting\n')
         if db_conn is not None:
@@ -103,14 +119,28 @@ def find_files(new_files_dir):
 def process_feature_files(db_conn, files_to_process):
     # Files must be processed in chronological order to ensure
     # updates are applied in the correct order
-    with db_conn:
-        cursor = db_conn.cursor()
-        for feature_file in sorted(files_to_process):
-            log.debug('Processing feature file ' + feature_file)
-            rows = get_tablet_data_rows(feature_file)
-            for row in rows:
-                sql, sql_params = get_location_update_sql(db_conn, row)
-                cursor.execute(sql, sql_params)
+
+    files_uploaded = []
+    files_error = []
+    for feature_file in sorted(files_to_process):
+        try:
+            log.info('Processing feature file ' + feature_file)
+            row_count = 0
+            with db_conn:
+                cursor = db_conn.cursor()
+                rows = get_tablet_data_rows(feature_file)
+                for row in rows:
+                    sql, sql_params = get_location_update_sql(db_conn, row)
+                    cursor.execute(sql, sql_params)
+                    row_count += 1
+            files_uploaded.append([feature_file, row_count])
+
+        except Exception as e:
+            log.error('Error processing feature file ' + feature_file)
+            log.exception(e)
+            files_error.append(feature_file)
+
+    return files_uploaded, files_error
 
 # data-feature spreadsheet column -> DB location table column
 FEATURE_NAME_COLUMN = '#FeatureName'
@@ -155,19 +185,33 @@ def get_feature_id(db_conn, feature_name):
 #-------------------------------------------------------------------------------
 def process_sample_files(db_conn, files_to_process):
 
-    with db_conn:
-        cursor = db_conn.cursor()
-        for sample_file in sorted(files_to_process):
-            log.debug('Processing sample file ' + sample_file)
-            rows = get_tablet_data_rows(sample_file)
-            for row in rows:
-                # Note the order is important here - the sample insertion
-                # SQL uses the MySQL last_insert_id() function to get the
-                # ID of the physical_data record
-                sql, sql_params, sample = get_physical_data_insert_sql(db_conn, row)
-                cursor.execute(sql, sql_params)
-                sql, sql_params = get_sample_insert_sql(db_conn, row, sample)
-                cursor.execute(sql, sql_params)
+    files_uploaded = []
+    files_error = []
+    for sample_file in sorted(files_to_process):
+        try:
+            log.info('Processing sample file ' + sample_file)
+            row_count = 0
+            with db_conn:
+                cursor = db_conn.cursor()
+                rows = get_tablet_data_rows(sample_file)
+                for row in rows:
+                    # Note the order is important here - the sample insertion
+                    # SQL uses the MySQL last_insert_id() function to get the
+                    # ID of the physical_data record
+                    sql, sql_params, sample = get_physical_data_insert_sql(db_conn, row)
+                    cursor.execute(sql, sql_params)
+                    sql, sql_params = get_sample_insert_sql(db_conn, row, sample)
+                    cursor.execute(sql, sql_params)
+                    row_count += 1
+
+            files_uploaded.append([sample_file, row_count])
+
+        except Exception as e:
+            log.error('Error processing sample file ' + sample_file)
+            log.exception(e)
+            files_error.append(feature_file)
+
+    return files_uploaded, files_error
 
 # data-sample spreadsheet column -> DB sample table column
 SAMPLE_COLUMN_MAP = {
@@ -192,19 +236,32 @@ def get_sample_insert_sql(db_conn, row, sample):
     feature_name = row[FEATURE_NAME_COLUMN]
     feature_id = get_feature_id(db_conn, feature_name)
 
-    if sample == None:
-        # Assume the physical_data row will be inserted immediately before this
-        # sample row is inserted
-        sql = 'insert into sample (phys_id,' + ','.join(column_names) + ',location_id) values (last_insert_id(),'+ ('%s,'*len(values)) +'%s)'
-        values.append(feature_id)
-    elif 'phys_id' in sample:
-        # sample and physical data records already exist, perform update
-        sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, location_id=%s where id=%s'
-        values.append(feature_id)
-        values.append(sample['id'])
+    if feature_id != None:
+        if sample == None:
+            # Assume the physical_data row will be inserted immediately before this
+            # sample row is inserted
+            sql = 'insert into sample (phys_id,' + ','.join(column_names) + ',location_id) values (last_insert_id(),'+ ('%s,'*len(values)) +'%s)'
+            values.append(feature_id)
+        elif 'phys_id' in sample:
+            # sample and physical data records already exist, perform update
+            sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, location_id=%s where id=%s'
+            values.append(feature_id)
+            values.append(sample['id'])
+        else:
+             # Update existing sample record, assume physical_data record inserted immediately before this
+            sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, phys_id=last_insert_id(), location_id=%s where id=%s'
+            values.append(feature_id)
+            values.append(sample['id'])
+
     else:
-         # Update existing sample record, assume physical_data record inserted immediately before this
-        sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, phys_id=last_insert_id() where id=%s'
+        if sample == None:
+            sql = 'insert into sample (phys_id,' + ','.join(column_names) + ') values (last_insert_id(),'+ ('%s,'*(len(values) - 1)) +'%s)'
+        elif 'phys_id' in sample:
+            sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s where id=%s'
+            values.append(sample['id'])
+        else:
+            sql = 'update sample set ' + '=%s,'.join(column_names) + '=%s, phys_id=last_insert_id() where id=%s'
+            values.append(sample['id'])
 
     return sql, values
 
@@ -290,40 +347,27 @@ def process_image_files(config, db_conn, files_to_process):
     s3_bucket_url = config.get(image_config, 's3_bucket_url')
     s3_folder = config.get(image_config, 's3_folder')
 
-    cursor = db_conn.cursor()
-    try:
-        for image_file, image_data in files_to_process.iteritems():
-            if (image_data[IMAGE_TYPE] != ''):
-                sample_id = get_sample_id(db_conn, image_data[IMAGE_SAMPLE_NUMBER])
-                if (sample_id != None):
-                    log.debug('Processing image file ' + image_file)
-                    # reduce image size
-                    reduced_image_file = reduce_image(working_dir, image_file)
-                    try:
-                        # upload reduced image to Amazon S3 bucket
-                        key = Key(s3_bucket)
-                        key.key = '/'.join([s3_folder, os.path.basename(image_file)])
-                        key.set_contents_from_filename(reduced_image_file)
-                        key.set_metadata('Content-Type', 'image/jpeg')
-                        key.make_public()
-                        image_url = '/'.join([s3_bucket_url, key.key])
+    files_uploaded = []
+    files_error = []
+    files_skipped = []
+    files_to_archive = []
+    for image_file, image_data in files_to_process.iteritems():
+        if (image_data[IMAGE_TYPE] != ''):
+            sample_id = get_sample_id(db_conn, image_data[IMAGE_SAMPLE_NUMBER])
+            if (sample_id != None):
+                upload_image(db_conn, working_dir, image_file, image_data,
+                             sample_id, s3_bucket, s3_folder, s3_bucket_url,
+                             files_uploaded, files_error)
+            else:
+                # sample not in the database...ignore
+                files_skipped.append(image_file)
 
-                        # insert image record into database
-                        cursor.execute(
-                            'insert into image (sample_id, image_path, image_type) values (%s, %s, %s)',
-                            [sample_id, image_url, image_data[IMAGE_TYPE]])
-                        db_conn.commit()
+        else:
+            # Image not uploaded to S3, but put in files_to_archive so
+            # the file is moved to the archive folder
+            files_to_archive.append(image_file)
 
-                    except Exception:
-                        if key != None:
-                            key.delete()
-                        raise
-
-                    finally:
-                        os.remove(reduced_image_file)
-
-    finally:
-        cursor.close()
+    return files_uploaded, files_error, files_skipped, files_to_archive
 
 
 def get_sample_id(db_conn, sample_number):
@@ -342,19 +386,70 @@ def reduce_image(working_dir, raw_image_file):
     image.save(reduced_image_file)
     return reduced_image_file
 
+def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
+                 s3_bucket, s3_folder, s3_bucket_url,
+                 files_uploaded, files_error):
+
+    log.info('Processing image file ' + image_file)
+    # reduce image size
+    reduced_image_file = reduce_image(working_dir, image_file)
+    try:
+        # upload reduced image to Amazon S3 bucket
+        key = Key(s3_bucket)
+        key.key = '/'.join([s3_folder, os.path.basename(image_file)])
+        key.set_contents_from_filename(reduced_image_file)
+        key.set_metadata('Content-Type', 'image/jpeg')
+        key.make_public()
+        image_url = '/'.join([s3_bucket_url, key.key])
+
+        # insert image record into database
+        with db_conn:
+            cursor = db_conn.cursor()
+            cursor.execute(
+                'insert into image (sample_id, image_path, image_type) values (%s, %s, %s)',
+                [sample_id, image_url, image_data[IMAGE_TYPE]])
+
+        files_uploaded.append(image_file)
+
+    except Exception as e:
+        log.error('Error processing image file ' + image_file)
+        log.exception(e)
+        files_error.append(image_file)
+        if key != None:
+            key.delete()
+
+    finally:
+        os.remove(reduced_image_file)
+
 #-------------------------------------------------------------------------------
 # NZGAL GEOCHEMISTRY FILE PROCESSING
 #-------------------------------------------------------------------------------
 def process_geochem_files(db_conn, files_to_process):
-    # open all .xls files in the
+    files_uploaded = []
+    files_error = []
+    files_skipped = []
     for xls_file in files_to_process:
         # open excel spreadsheet - this loads the file into memory then closes it
-        workbook = xlrd.open_workbook(xls_file)
-        worksheet = workbook.sheet_by_index(0)
-        if (is_geochem(worksheet)):
-            log.debug('Processing geochem file ' + xls_file)
-            process_geochem_worksheet(db_conn, worksheet)
+        try:
+            workbook = xlrd.open_workbook(xls_file)
+            worksheet = workbook.sheet_by_index(0)
+            if (is_geochem(worksheet)):
+                log.info('Processing geochem file ' + xls_file)
+                row_count = process_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
+                if row_count == 0:
+                    files_skipped.append(xls_file)
+                else:
+                    files_uploaded.append([xls_file, row_count])
 
+            else:
+                files_skipped.append(xls_file)
+
+        except Exception as e:
+            log.error('Error processing geochemistry file ' + xls_file)
+            log.exception(e)
+            files_error.append(xls_file)
+
+    return files_uploaded, files_error, files_skipped
 
 
 # geochemistry spreadsheet row -> DB chemical_data table column
@@ -367,16 +462,38 @@ GEOCHEMISTRY_COLUMN_MAP = {
 
 # Matches 'P1.0023', 'P1-0023', etc
 SAMPLE_NUMBER_RE = re.compile('^P1.(\d{4})$', re.IGNORECASE)
-def process_geochem_worksheet(db_conn, worksheet):
+
+# Matches '1234', '1.234', '.1234', etc
+NUMERIC_RE= re.compile('^[0-9]+|(?:[0-9]*\.[0-9]+)$')
+
+# Matches '<1234', '<1.234', '<.1234', etc
+BELOW_DETECTION_LIMIT_RE = re.compile('^<([0-9]+|(?:[0-9]*\.[0-9]+))$')
+
+def process_geochem_worksheet(db_conn, worksheet, file_name):
 
     param_column = 0
-    geochem_data = {}
+    geochem_updates = []
     for col_index in range (2, worksheet.ncols):
         sample_number = None
         row_data = {}
         for row_index in range (0, worksheet.nrows):
-            if (sample_number != None and worksheet.cell_type(row_index, param_column) == xlrd.XL_CELL_TEXT):
-                row_data[worksheet.cell_value(row_index, param_column)] = worksheet.cell_value(row_index, col_index)
+            parameter_name = worksheet.cell_value(row_index, param_column)
+            if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
+                # result values should be '[numeric value]' or '<[numeric value]
+                # if the concentration is less than the detection limit
+                result = worksheet.cell_value(row_index, col_index)
+                if NUMERIC_RE.match(result):
+                    row_data[parameter_name] = result
+                else:
+                    bdl = BELOW_DETECTION_LIMIT_RE.match(result)
+                    if bdl:
+                        row_data[parameter_name] = '-' + result
+                    else:
+                        raise Exception(
+                            'Unexpected result value "'+result+'" for sample '
+                            + sample_number + ' in ' + file_name
+                            + ' cell ['+row_index+','+col_index+']')
+
 
             if worksheet.cell_type(row_index, col_index) == xlrd.XL_CELL_TEXT:
                 sample_match = SAMPLE_NUMBER_RE.match(worksheet.cell_value(row_index, col_index))
@@ -385,26 +502,37 @@ def process_geochem_worksheet(db_conn, worksheet):
 
         if sample_number != None and len(row_data) > 0:
             sample = get_sample(db_conn, sample_number)
-            geochem_id = get_geochem_id(db_conn, sample_number)
-            if sample == None:
-                # Sample data not yet added, add stub
-                pass
-            elif 'chem_id' in sample:
-                # Update to existing chemical data
-                geochem_data[sample['chem_id']] = row_data
-            elif 'id' in sample:
-                # New chemical data
-                geochem_data[sample_number] = row_data
+            update_data = {
+                'sample_number': sample_number,
+                'sample_id': None,
+                'chem_id': None,
+                'row_data': row_data
+            }
 
+            if sample != None:
+                update_data['sample_id'] = sample['id']
+                if 'chem_id' in sample:
+                    update_data['chem_id'] = sample['chem_id']
 
+            geochem_updates.append(update_data)
+
+    row_count = 0
     with db_conn:
         cursor = db_conn.cursor()
-        for row_id, row_data in geochem_data.iteritems():
-            geochem_id = None if SAMPLE_NUMBER_RE.match(row_id) else row_id
-            sql, sql_params = get_geochem_update_sql(geochem_id, row_data)
+        for update_data in geochem_updates:
+            sql, sql_params = get_geochem_update_sql(update_data['chem_id'], update_data['row_data'])
             cursor.execute(sql, sql_params)
-            if geochem_id == None:
-                cursor.execute('update sample set chem_id=last_insert_id() where sample_number=%s', row_id)
+            if update_data['chem_id'] == None:
+                if update_data['sample_id'] == None:
+                    cursor.execute(
+                        'insert into sample (sample_number, chem_id, date_gathered, sampler) values (%s, last_insert_id(), now(), %s)',
+                        [update_data['sample_number'], 'Unknown']
+                        )
+                else:
+                    cursor.execute('update sample set chem_id=last_insert_id() where id=%s', update_data['sample_id'])
+            row_count += 1
+
+    return row_count
 
 
 def get_geochem_update_sql(geochem_id, row):
@@ -415,7 +543,7 @@ def get_geochem_update_sql(geochem_id, row):
 
     else:
         sql = 'update chemical_data set ' + '=%s,'.join(column_names) + '=%s where id=%s'
-        values.append(row_id)
+        values.append(geochem_id)
 
 
     return sql, values
@@ -427,18 +555,6 @@ def is_geochem(worksheet):
 #-------------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 #-------------------------------------------------------------------------------
-
-def get_sample(db_conn, sample_number):
-    cursor = db_conn.cursor()
-    try:
-        cursor.execute('select * from sample where sample_number=%s', sample_number)
-        rows = cursor.fetchall()
-        if len(rows) == 0:
-            return None
-        return dict(zip([i[0] for i in cursor.description], [i for i in rows[0]]))
-
-    finally:
-        cursor.close()
 
 # file_path: path of tab-delimited file containing a header line of column names
 #
@@ -475,33 +591,96 @@ def get_column_names_and_values(row, column_map):
 
     return column_names, values
 
+def add_upload_summary(file_type, files_uploaded, files_error, files_skipped):
+    indent = '  '
+    add_to_notification('\n' + file_type + ' file upload summary')
+
+    add_to_notification(indent + 'Files uploaded: '+ str(len(files_uploaded)))
+    add_file_list(indent*2, files_uploaded)
+
+    if len(files_error) > 0:
+        add_to_notification(indent + 'Files not uploaded due to errors: '+ str(len(files_error)))
+        add_file_list(indent*2, files_error)
+
+    if len(files_skipped) > 0:
+        add_to_notification(indent + 'Files skipped due to unrecognized format: '+ str(len(files_skipped)))
+        add_file_list(indent*2, files_skipped)
+
+def add_file_list(indent, file_list):
+    for file_data in file_list:
+        # file_data should be either the full file path or a two element array
+        # in the form [full file path, record count]
+        if isinstance(file_data, basestring):
+            add_to_notification(indent + get_relative_path(file_data))
+        else:
+            rec = ' records' if file_data[1] != 1 else ' record'
+            add_to_notification(indent + get_relative_path(file_data[0]) + ': '+ str(file_data[1]) + rec)
+
+def add_to_notification(msg_line):
+    global notification_msg;
+    notification_msg = '\n'.join([notification_msg, msg_line])
+
+def get_sample(db_conn, sample_number):
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute('select * from sample where sample_number=%s', sample_number)
+        rows = cursor.fetchall()
+        if len(rows) == 0:
+            return None
+        return dict(zip([i[0] for i in cursor.description], [i for i in rows[0]]))
+
+    finally:
+        cursor.close()
+
 def send_error_notification(log_file_name, config):
     try:
-        send_email(
-            log_file_name,
-            "1000 Springs data upload error",
-            config.get('ScriptErrorEmail', 'from'),
-            re.split('\s*,\s*', config.get('ScriptErrorEmail', 'to_csv')),
-            config.get('ScriptErrorEmail', 'host'))
+        fp = open(log_file_name, 'rb')
+        msg = fp.read()
+        fp.close()
 
-    except BaseException as e:
-        log.error("Failed to send error notification");
+        send_email(
+            msg,
+            "1000 Springs data upload error",
+            'error_to_csv',
+            config
+            )
+
+    except Exception as e:
+        log.error("Failed to send error notification")
         log.exception(e)
 
+
+def send_upload_notification(config):
+
+    global notification_msg
+    send_email(
+        notification_msg,
+        "1000 Springs data upload complete",
+        'upload_stats_to_csv',
+        config
+        )
+
+
+
 # email_to is an array of email addresses
-def send_email(message_file_name, subject, email_from, email_to, smtp_host):
+def send_email(message, subject, email_to_config_key, config):
 
-    fp = open(message_file_name, 'rb')
-    msg = MIMEText(fp.read())
-    fp.close()
-
+    email_from =  config.get('Email', 'from')
+    email_to = config.get('Email', email_to_config_key)
+    msg = MIMEText(message)
     msg['Subject'] = subject
     msg['From'] = email_from
-    msg['To'] = ", ".join(email_to)
+    msg['To'] = email_to
 
-    s = smtplib.SMTP(smtp_host)
-    s.sendmail(email_from, email_to, msg.as_string())
+    s = smtplib.SMTP(config.get('Email', 'host'))
+    s.sendmail(email_from, re.split('\s*,\s*', email_to), msg.as_string())
     s.quit()
+
+def get_relative_path(file_name):
+    if (file_name.startswith(new_files_dir)):
+        return file_name[len(new_files_dir) + 1:]
+    else:
+        return file_name
 
 
 def init_logging(config):
@@ -587,6 +766,31 @@ def get_sub_dir(config, dir_type):
     global MOUNT_SECTION
     base_dir = mount_data_share(config)
     return os.path.join(base_dir, config.get(MOUNT_SECTION, dir_type))
+
+def move_files(file_list, output_dir):
+    for file_data in file_list:
+        if isinstance(file_data, basestring):
+            source_file = file_data
+        else:
+            source_file = file_data[0]
+
+        target_file = os.path.join(output_dir, get_relative_path(source_file))
+        folder = os.path.dirname(target_file)
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+        orig_target_file = target_file
+        i = 1
+        while os.path.isfile(target_file):
+            target_file = orig_target_file + ' (' + str(i) +')'
+            i += 1
+
+        os.rename(source_file, target_file)
+
+        source_dir = os.path.dirname(source_file)
+        if source_dir != new_files_dir and len(os.listdir(source_dir)) == 0:
+            os.rmdir(source_dir)
+
 
 def unmount_data_share(config):
     global MOUNT_SECTION
