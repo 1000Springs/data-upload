@@ -1,12 +1,31 @@
 #-------------------------------------------------------------------------------
-# Name:        1000 Springs Tablet Data Uploader
-# Purpose:     Upload data and images collected using the 1000 Springs
-#              Android tablet app to the 1000 Springs database.
+# Name:        1000 Springs data uploader
+# Purpose:     Upload data data to the 1000 Springs database. The data includes
+#              images collected using the 1000 Springs Android tablet app
+#              and test results spreadsheets from the laboratories.
+#
+#              Images tagged as 'BESTPHOTO' or 'BESTSKETCH' etc are uploaded to
+#              an Amazon S3 bucket. Spreadsheet data is uploaded to an Amazon
+#              RDS MySQL database.
+#
+#              If data has a record identifier (sample number or feature name)
+#              which already exists, the record will be updated otherwise a
+#              new record will be inserted.
+#
+#              If a data file contains one or more corrupt records (or if an
+#              error occurs during file processing) no records from that file
+#              will be uploaded - it's all or nothing.
+#
+#              After data upload is completed, an email summarising the record
+#              upload is sent.
+#
+#              If an error occurs during processing, a notification email is sent
+#              containing the debug log.
+#
+#              Script written for 32-bit Windows Python 2.7
 #
 # Author:      duncanw
 # Created:     07/10/2013
-# Updated:     $Date:  $
-# Revision:    $Revision: $
 #-------------------------------------------------------------------------------
 
 import os
@@ -26,7 +45,7 @@ from boto.s3.key import Key
 import xlrd
 
 log = logging.getLogger('Springs Uploader')
-notification_msg = '1000 Springs data upload results:'
+notification_msg = '1000 Springs data upload results'
 new_files_dir = None
 
 def main():
@@ -41,6 +60,7 @@ def main():
         log.info('upload_tablet_data.py '+str(sys.argv))
         db_conn = db_connect(config)
         new_files_dir = get_new_files_dir(config)
+
         feature_files, sample_files, image_files, other_xls_files = find_files(new_files_dir)
 
         f_files_uploaded, f_files_error = process_feature_files(db_conn, feature_files)
@@ -78,9 +98,13 @@ def main():
         if log_file is not None:
             log_file.close()
 
+
+# keys used for attributes contained in image file names
 IMAGE_SAMPLE_NUMBER = 'sample_number'
 IMAGE_TYPE = 'image_type'
 
+# Recursively looks for files in the given directory, looking for files
+# with names that match expected image and data file name formats.
 def find_files(new_files_dir):
 
     feature_file_re = re.compile('data-features-[0-9]+\.xls')
@@ -113,6 +137,7 @@ def find_files(new_files_dir):
 
     return feature_files, sample_files, image_files, other_xls_files
 
+
 #-------------------------------------------------------------------------------
 # FEATURE FILE PROCESSING
 #-------------------------------------------------------------------------------
@@ -142,6 +167,7 @@ def process_feature_files(db_conn, files_to_process):
 
     return files_uploaded, files_error
 
+
 # data-feature spreadsheet column -> DB location table column
 FEATURE_NAME_COLUMN = '#FeatureName'
 FEATURE_COLUMN_MAP = {
@@ -152,6 +178,12 @@ FEATURE_COLUMN_MAP = {
     'AccessType': 'access'
 }
 
+
+# row: a dict in the form {column_name_1 => value_1, column_name_2 => value_2},
+#      where column_names are those from the data spreadsheet.
+#
+# Returns an insert or an update SQL statement and a list of parameter values
+# to be inserted into the statement.
 def get_location_update_sql(db_conn, row):
 
     column_names, values = get_column_names_and_values(row, FEATURE_COLUMN_MAP)
@@ -167,6 +199,9 @@ def get_location_update_sql(db_conn, row):
 
     return sql, values
 
+
+# Returns the location.id of the geothermal feature with the given
+# location.feature_name, or None if there is no such record in the database
 def get_feature_id(db_conn, feature_name):
     cursor = db_conn.cursor()
     try:
@@ -179,6 +214,7 @@ def get_feature_id(db_conn, feature_name):
 
     finally:
         cursor.close()
+
 
 #-------------------------------------------------------------------------------
 # SAMPLE FILE PROCESSING
@@ -213,6 +249,7 @@ def process_sample_files(db_conn, files_to_process):
 
     return files_uploaded, files_error
 
+
 # data-sample spreadsheet column -> DB sample table column
 SAMPLE_COLUMN_MAP = {
     'SampleNumber': 'sample_number',
@@ -225,6 +262,13 @@ DATE_NO_SECONDS_RE = re.compile('^\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{1,2}$')
 DATE_NO_SECONDS_FORMAT = '%d/%m/%Y %H:%M'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
+# row: a dict in the form {column_name_1 => value_1, column_name_2 => value_2},
+#      where column_names are those from the DATA SPREADSHEET.
+# sample: a dict in the form {column_name_1 => value_1, column_name_2 => value_2},
+#      where column_names are those from the DATABASE.
+#
+# Returns an insert or an update SQL statement and a list of parameter values
+# to be inserted into the statement.
 def get_sample_insert_sql(db_conn, row, sample):
 
     # Older files have a different date format, need to canonicalise it
@@ -265,6 +309,7 @@ def get_sample_insert_sql(db_conn, row, sample):
 
     return sql, values
 
+
 # data-sample spreadsheet column -> DB physical_data table column
 SAMPLE_TO_PHYSICAL_COLUMN_MAP = {
     'SampleTemperature': 'sampleTemp',
@@ -286,6 +331,11 @@ SAMPLE_TO_PHYSICAL_COLUMN_MAP = {
 
 COLOUR_RE = re.compile('ff([a-f0-9]{6})', re.IGNORECASE)
 
+# row: a dict in the form {column_name_1 => value_1, column_name_2 => value_2},
+#      where column_names are those from the data spreadsheet.
+#
+# Returns an insert or an update SQL statement and a list of parameter values
+# to be inserted into the statement.
 def get_physical_data_insert_sql(db_conn, row):
 
     colourData = COLOUR_RE.match(row['ColourRgbHex'])
@@ -370,6 +420,8 @@ def process_image_files(config, db_conn, files_to_process):
     return files_uploaded, files_error, files_skipped, files_to_archive
 
 
+# Returns the sample.id of the sample with the given
+# sample.sample_number, or None if there is no such record in the database
 def get_sample_id(db_conn, sample_number):
     sample = get_sample(db_conn, sample_number)
     if sample == None:
@@ -377,6 +429,12 @@ def get_sample_id(db_conn, sample_number):
     else:
         return sample['id']
 
+
+# working_dir: absolute path of directory for putting reduced images in.
+# raw_image_file: absolute path of an image file.
+#
+# Returns the absolute path of a new image file with reduced size and resolution
+# for easier use on the web.
 def reduce_image(working_dir, raw_image_file):
     image = Image.open(raw_image_file)
     height = 300
@@ -386,6 +444,9 @@ def reduce_image(working_dir, raw_image_file):
     image.save(reduced_image_file)
     return reduced_image_file
 
+
+# Uploads the image_file to the given Amazon S3 bucket, and creates
+# an image record in the database
 def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
                  s3_bucket, s3_folder, s3_bucket_url,
                  files_uploaded, files_error):
@@ -405,9 +466,8 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
         # insert image record into database
         with db_conn:
             cursor = db_conn.cursor()
-            cursor.execute(
-                'insert into image (sample_id, image_path, image_type) values (%s, %s, %s)',
-                [sample_id, image_url, image_data[IMAGE_TYPE]])
+            sql, sql_params = get_image_data_insert_sql(db_conn, sample_id, image_url, image_data)
+            cursor.execute(sql, sql_params)
 
         files_uploaded.append(image_file)
 
@@ -420,6 +480,43 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
 
     finally:
         os.remove(reduced_image_file)
+
+
+# sample_id: sample.id of the sample the image is associated with.
+# image_url: Amazon S3 URL of the image.
+# image_data: dict containing the image type, e.g {image_type: 'BESTPHOTO'}
+#
+# Returns an insert or an update SQL statement and a list of parameter values
+# to be inserted into the statement.
+def get_image_data_insert_sql(db_conn, sample_id, image_url, image_data):
+
+    image_id = get_image_id(db_conn, sample_id,  image_data[IMAGE_TYPE])
+    if (image_id != None):
+        sql = 'update image set image_path=%s where id=%s'
+        values = [image_url, image_id]
+    else:
+        sql = 'insert into image (sample_id, image_path, image_type) values (%s, %s, %s)'
+        values = [sample_id, image_url, image_data[IMAGE_TYPE]]
+
+    return sql, values
+
+
+# Returns the image.id of the image record with the given
+# image.sample_id and image.image_type, or None if there is no such record in the database
+def get_image_id(db_conn, sample_id, image_type):
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute('select id from image where sample_id=%s and image_type=%s', [sample_id, image_type])
+        rows = cursor.fetchall()
+        if len(rows) == 0:
+            return None
+
+        return rows[0][0]
+
+    finally:
+        cursor.close()
+
+
 
 #-------------------------------------------------------------------------------
 # NZGAL GEOCHEMISTRY FILE PROCESSING
@@ -469,6 +566,11 @@ NUMERIC_RE= re.compile('^[0-9]+|(?:[0-9]*\.[0-9]+)$')
 # Matches '<1234', '<1.234', '<.1234', etc
 BELOW_DETECTION_LIMIT_RE = re.compile('^<([0-9]+|(?:[0-9]*\.[0-9]+))$')
 
+# worksheet: xlrd worksheet instance created from an Excel workbook
+# file_name: absolute path of the Excel workbook, just used for error logging.
+#
+# Parses the given worksheet, and inserts relevant results into the database.
+# Returns the number of records inserted or updated.
 def process_geochem_worksheet(db_conn, worksheet, file_name):
 
     param_column = 0
@@ -480,7 +582,9 @@ def process_geochem_worksheet(db_conn, worksheet, file_name):
             parameter_name = worksheet.cell_value(row_index, param_column)
             if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
                 # result values should be '[numeric value]' or '<[numeric value]
-                # if the concentration is less than the detection limit
+                # if the concentration is less than the detection limit.
+                # Values below the detection limit are recorded as negative
+                # numbers in the database, e.g '<0.2' is recorded as '-0.2'
                 result = worksheet.cell_value(row_index, col_index)
                 if NUMERIC_RE.match(result):
                     row_data[parameter_name] = result
@@ -535,6 +639,11 @@ def process_geochem_worksheet(db_conn, worksheet, file_name):
     return row_count
 
 
+# row: a dict in the form {column_name_1 => value_1, column_name_2 => value_2},
+#      where column_names are those from the data spreadsheet.
+#
+# Returns an insert or an update SQL statement and a list of parameter values
+# to be inserted into the statement.
 def get_geochem_update_sql(geochem_id, row):
 
     column_names, values = get_column_names_and_values(row, GEOCHEMISTRY_COLUMN_MAP)
@@ -545,8 +654,8 @@ def get_geochem_update_sql(geochem_id, row):
         sql = 'update chemical_data set ' + '=%s,'.join(column_names) + '=%s where id=%s'
         values.append(geochem_id)
 
-
     return sql, values
+
 
 def is_geochem(worksheet):
     return worksheet.cell_type(0, 0) == xlrd.XL_CELL_TEXT and worksheet.cell_value(0,0) == 'Geochemistry Results'
@@ -591,6 +700,9 @@ def get_column_names_and_values(row, column_map):
 
     return column_names, values
 
+
+# file_type: e.g 'Feature' or 'Sample'
+# Adds file upload statistics to the email notification sent out for the upload.
 def add_upload_summary(file_type, files_uploaded, files_error, files_skipped):
     indent = '  '
     add_to_notification('\n' + file_type + ' file upload summary')
@@ -606,6 +718,9 @@ def add_upload_summary(file_type, files_uploaded, files_error, files_skipped):
         add_to_notification(indent + 'Files skipped due to unrecognized format: '+ str(len(files_skipped)))
         add_file_list(indent*2, files_skipped)
 
+
+# Adds a list of files and the number of records retrieved from each to the
+# email notification sent out for the upload.
 def add_file_list(indent, file_list):
     for file_data in file_list:
         # file_data should be either the full file path or a two element array
@@ -616,10 +731,21 @@ def add_file_list(indent, file_list):
             rec = ' records' if file_data[1] != 1 else ' record'
             add_to_notification(indent + get_relative_path(file_data[0]) + ': '+ str(file_data[1]) + rec)
 
+
+# Adds the given line to the email notification sent out for the upload.
 def add_to_notification(msg_line):
     global notification_msg;
     notification_msg = '\n'.join([notification_msg, msg_line])
 
+# sample_number: e.g 'P1.0023'
+# Returns the sample record with the given sample_number, or None if no such
+# record exists. Returned value is a dict of columns from the DB, e.g:
+#   {
+#     id: 1583
+#     sample_number: 'P1.0023'
+#     location_id: 916
+#     ...
+#  }
 def get_sample(db_conn, sample_number):
     cursor = db_conn.cursor()
     try:
@@ -661,8 +787,6 @@ def send_upload_notification(config):
         )
 
 
-
-# email_to is an array of email addresses
 def send_email(message, subject, email_to_config_key, config):
 
     email_from =  config.get('Email', 'from')
@@ -676,6 +800,14 @@ def send_email(message, subject, email_to_config_key, config):
     s.sendmail(email_from, re.split('\s*,\s*', email_to), msg.as_string())
     s.quit()
 
+
+# Returns the path of the given file relative to the file import directory.
+# e.g if the file_name is:
+#  'C:\tmp\data\Incoming\2013091303 1000 Project - Waiotapu.xls
+# and the import directory is
+#  'C:\tmp\data\Incoming',
+# the value returned would be:
+# '2013091303 1000 Project - Waiotapu.xls'
 def get_relative_path(file_name):
     if (file_name.startswith(new_files_dir)):
         return file_name[len(new_files_dir) + 1:]
