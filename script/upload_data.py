@@ -69,16 +69,17 @@ def main():
         s_files_uploaded, s_files_error =  process_sample_files(db_conn, sample_files)
         add_upload_summary('Sample', s_files_uploaded, s_files_error, [])
 
-        i_files_uploaded, i_files_error, i_files_skipped, i_files_to_archive = process_image_files(config, db_conn, image_files)
-        add_upload_summary('Image',  i_files_uploaded, i_files_error, i_files_skipped)
-
         g_files_uploaded, g_files_error, g_files_skipped = process_geochem_files(db_conn, other_xls_files)
         add_upload_summary('Geochemistry', g_files_uploaded, g_files_error, g_files_skipped)
+
+        i_files_uploaded, i_files_error, i_files_skipped, i_files_to_archive = process_image_files(config, db_conn, image_files)
+        add_upload_summary('Image',  i_files_uploaded, i_files_error, i_files_skipped)
 
         move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded, get_archive_dir(config))
         move_files(f_files_error + s_files_error + i_files_error + g_files_error, get_error_dir(config))
 
-        send_upload_notification(config)
+        if feature_files or sample_files or image_files or other_xls_files:
+            send_upload_notification(config)
 
         unmount_data_share(config)
 
@@ -697,7 +698,7 @@ def get_column_names_and_values(row, column_map):
     column_names = []
     values = []
     for key, value in row.items():
-        if value != None and key in column_map:
+        if value != None and value != '' and key in column_map:
             column_names.append(column_map[key])
             values.append(value)
 
