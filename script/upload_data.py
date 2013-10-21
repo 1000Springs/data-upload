@@ -879,7 +879,7 @@ def mount_data_share(config):
     if not os.path.isdir(local_path):
         mount_command = "net use "+ mount_drive +": " + config.get(MOUNT_SECTION, 'path') + " /user:" + config.get(MOUNT_SECTION, 'user')
         log.info("Mounting with "+ mount_command)
-        os.system(mount_command + " " + config.get(mount_section, 'password'))
+        os.system(mount_command + " " + config.get(MOUNT_SECTION, 'password'))
         if os.path.isdir(local_path):
             log.info('Mount successful')
         else:
