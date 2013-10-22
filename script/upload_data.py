@@ -726,7 +726,7 @@ def add_upload_summary(file_type, files_uploaded, files_error, files_skipped):
 # Adds a list of files and the number of records retrieved from each to the
 # email notification sent out for the upload.
 def add_file_list(indent, file_list):
-    for file_data in file_list:
+    for file_data in sorted(file_list):
         # file_data should be either the full file path or a two element array
         # in the form [full file path, record count]
         if isinstance(file_data, basestring):
