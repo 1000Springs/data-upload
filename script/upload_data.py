@@ -461,8 +461,12 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
         # upload reduced image to Amazon S3 bucket
         key = Key(s3_bucket)
         key.key = '/'.join([s3_folder, os.path.basename(image_file)])
+        # Encourage browser caching of up to 10 days
+        key.metadata.update({
+            'Content-Type': 'image/jpeg',
+            'Cache-Control': 'max-age=864000'
+        })
         key.set_contents_from_filename(reduced_image_file)
-        key.set_metadata('Content-Type', 'image/jpeg')
         key.make_public()
         image_url = '/'.join([s3_bucket_url, key.key])
 
