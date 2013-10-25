@@ -40,6 +40,7 @@ import codecs
 
 import MySQLdb
 from PIL import Image
+from PIL import ExifTags
 from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 import xlrd
@@ -438,9 +439,24 @@ def get_sample_id(db_conn, sample_number):
 # for easier use on the web.
 def reduce_image(working_dir, raw_image_file):
     image = Image.open(raw_image_file)
+    exif_data = image._getexif()
+
     height = 300
     max_width = 400
     image.thumbnail((max_width, height), Image.ANTIALIAS)
+
+    # Where the image is in portrait or upside down, we rotate it so it
+    # is displayed properly on the website
+    # See http://www.impulseadventure.com/photo/exif-orientation.html
+    # 274 is the Exif tag for orientation data.
+    orientation = exif_data[274]
+    if (orientation == 8):
+        image = image.rotate(90)
+    elif (orientation == 3):
+        image = image.rotate(180)
+    elif (orientation == 6):
+        image = image.rotate(270)
+
     reduced_image_file = os.path.join(working_dir, os.path.basename(raw_image_file))
     image.save(reduced_image_file)
     return reduced_image_file
