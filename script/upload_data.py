@@ -37,6 +37,7 @@ import smtplib
 from email.mime.text import MIMEText
 import re
 import codecs
+import base64
 
 import MySQLdb
 from PIL import Image
@@ -190,24 +191,27 @@ def get_location_update_sql(db_conn, row):
 
     column_names, values = get_column_names_and_values(row, FEATURE_COLUMN_MAP)
     feature_name = row[FEATURE_NAME_COLUMN]
-    feature_id = get_feature_id(db_conn, feature_name)
+    observation_id = get_observation_id(feature_name)
+    feature_id = get_feature_id(db_conn, observation_id)
 
     if feature_id != None:
-        sql = 'update location set ' + '=%s,'.join(column_names) + '=%s where id=%s'
+        sql = 'update location set ' + '=%s,'.join(column_names) + '=%s, observation_id=%s where id=%s'
+        values.append(observation_id)
         values.append(feature_id)
     else:
-        sql = 'insert into location (' + ','.join(column_names) + ', feature_name) values ('+ ('%s,'*len(values)) +'%s)'
+        sql = 'insert into location (' + ','.join(column_names) + ', feature_name, observation_id) values ('+ ('%s,'*(len(values) + 1)) +'%s)'
         values.append(feature_name)
+        values.append(observation_id)
 
     return sql, values
 
 
 # Returns the location.id of the geothermal feature with the given
 # location.feature_name, or None if there is no such record in the database
-def get_feature_id(db_conn, feature_name):
+def get_feature_id(db_conn, observation_id):
     cursor = db_conn.cursor()
     try:
-        cursor.execute('select id from location where feature_name=%s', feature_name)
+        cursor.execute('select id from location where observation_id=%s', observation_id)
         rows = cursor.fetchall()
         if len(rows) == 0:
             return None
@@ -217,6 +221,11 @@ def get_feature_id(db_conn, feature_name):
     finally:
         cursor.close()
 
+# Returns a base-64 encoded version of the feature name. This is used as an ID
+# to link samples to features (as the feature name may get changed for better
+# presentation in the website.
+def get_observation_id(feature_name):
+    return base64.b64encode(feature_name)[:80]
 
 #-------------------------------------------------------------------------------
 # SAMPLE FILE PROCESSING
@@ -280,7 +289,7 @@ def get_sample_insert_sql(db_conn, row, sample):
 
     column_names, values = get_column_names_and_values(row, SAMPLE_COLUMN_MAP)
     feature_name = row[FEATURE_NAME_COLUMN]
-    feature_id = get_feature_id(db_conn, feature_name)
+    feature_id = get_feature_id(db_conn, get_observation_id(feature_name))
 
     if feature_id != None:
         if sample == None:
@@ -449,13 +458,14 @@ def reduce_image(working_dir, raw_image_file):
     # is displayed properly on the website
     # See http://www.impulseadventure.com/photo/exif-orientation.html
     # 274 is the Exif tag for orientation data.
-    orientation = exif_data[274]
-    if (orientation == 8):
-        image = image.rotate(90)
-    elif (orientation == 3):
-        image = image.rotate(180)
-    elif (orientation == 6):
-        image = image.rotate(270)
+    if exif_data != None and 274 in exif_data:
+        orientation = exif_data[274]
+        if (orientation == 8):
+            image = image.rotate(90)
+        elif (orientation == 3):
+            image = image.rotate(180)
+        elif (orientation == 6):
+            image = image.rotate(270)
 
     reduced_image_file = os.path.join(working_dir, os.path.basename(raw_image_file))
     image.save(reduced_image_file)
