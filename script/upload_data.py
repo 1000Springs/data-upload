@@ -63,7 +63,7 @@ def main():
         db_conn = db_connect(config)
         new_files_dir = get_new_files_dir(config)
 
-        feature_files, sample_files, image_files, other_xls_files = find_files(new_files_dir)
+        feature_files, sample_files, image_files, other_xls_files, usb_drive_cruft_files = find_files(new_files_dir)
 
         f_files_uploaded, f_files_error = process_feature_files(db_conn, feature_files)
         add_upload_summary('Feature',  f_files_uploaded, f_files_error, [])
@@ -82,6 +82,8 @@ def main():
 
         if feature_files or sample_files or image_files or other_xls_files:
             send_upload_notification(config)
+
+        process_usb_drive_cruft_files(usb_drive_cruft_files)
 
         unmount_data_share(config)
 
@@ -113,10 +115,12 @@ def find_files(new_files_dir):
     feature_file_re = re.compile('data-features-[0-9]+\.xls')
     sample_file_re = re.compile('data-samples-[0-9]+\.xls')
     other_xls_file_re = re.compile('.*\.xls')
+    usb_drive_cruft_file_re = re.compile('Thumbs\.db')
     image_file_re = re.compile('(P1\.\d{4})_([A-Z]*)_\d+\.jpg')
     feature_files = []
     sample_files = []
     other_xls_files = []
+    usb_drive_cruft_files = []
     image_files = {}
     for dirpath, dirnames, filenames in os.walk(new_files_dir):
         for filename in filenames:
@@ -130,6 +134,9 @@ def find_files(new_files_dir):
             elif (other_xls_file_re.match(filename)):
                 other_xls_files.append(file_path)
 
+            elif (usb_drive_cruft_file_re.match(filename)):
+                usb_drive_cruft_files.append(file_path)
+
             else:
                 image = image_file_re.match(filename)
                 if (image):
@@ -138,7 +145,7 @@ def find_files(new_files_dir):
                         IMAGE_TYPE: image.group(2)
                     }
 
-    return feature_files, sample_files, image_files, other_xls_files
+    return feature_files, sample_files, image_files, other_xls_files, usb_drive_cruft_files
 
 
 #-------------------------------------------------------------------------------
@@ -695,6 +702,7 @@ def is_geochem(worksheet):
     return worksheet.cell_type(0, 0) == xlrd.XL_CELL_TEXT and worksheet.cell_value(0,0) == 'Geochemistry Results'
 
 
+
 #-------------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 #-------------------------------------------------------------------------------
@@ -848,6 +856,17 @@ def get_relative_path(file_name):
     else:
         return file_name
 
+# Folders from the Android tablet contain a Thumbs.db
+# file from the USB stick, delete these so folders are
+# deleted properly
+def process_usb_drive_cruft_files(usb_drive_cruft_files):
+
+    try:
+        for f in usb_drive_cruft_files:
+            remove_file(f)
+    except Exception as e:
+        log.error('Error removing USB drive temp file')
+        log(e)
 
 def init_logging(config):
     # Required to prevent duplicate log messages when the script
@@ -953,9 +972,13 @@ def move_files(file_list, output_dir):
 
         os.rename(source_file, target_file)
 
-        source_dir = os.path.dirname(source_file)
-        if source_dir != new_files_dir and len(os.listdir(source_dir)) == 0:
-            os.rmdir(source_dir)
+        remove_file(source_file)
+
+
+def remove_file(source_file):
+    source_dir = os.path.dirname(source_file)
+    if source_dir != new_files_dir and len(os.listdir(source_dir)) == 0:
+        os.rmdir(source_dir)
 
 
 def unmount_data_share(config):
