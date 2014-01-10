@@ -230,7 +230,7 @@ def get_feature_id(db_conn, observation_id):
 
 # Returns a base-64 encoded version of the feature name. This is used as an ID
 # to link samples to features (as the feature name may get changed for better
-# presentation in the website.
+# presentation in the website).
 def get_observation_id(feature_name):
     return base64.b64encode(feature_name)[:80]
 
@@ -558,9 +558,8 @@ def get_image_id(db_conn, sample_id, image_type):
         cursor.close()
 
 
-
 #-------------------------------------------------------------------------------
-# NZGAL GEOCHEMISTRY FILE PROCESSING
+# GEOCHEMISTRY FILE PROCESSING
 #-------------------------------------------------------------------------------
 def process_geochem_files(db_conn, files_to_process):
     files_uploaded = []
@@ -571,16 +570,19 @@ def process_geochem_files(db_conn, files_to_process):
         try:
             workbook = xlrd.open_workbook(xls_file)
             worksheet = workbook.sheet_by_index(0)
-            if (is_geochem(worksheet)):
-                log.info('Processing geochem file ' + xls_file)
-                row_count = process_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
-                if row_count == 0:
-                    files_skipped.append(xls_file)
-                else:
-                    files_uploaded.append([xls_file, row_count])
+            row_count = 0
+            if is_nzgal_geochem(worksheet):
+                log.info('Processing NZGAL geochem file ' + xls_file)
+                row_count = process_nzgal_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
+            elif is_uow_geochem(worksheet):
+                log.info('Processing UoW geochem file ' + xls_file)
+                row_count = process_uow_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
 
-            else:
+            if row_count == 0:
                 files_skipped.append(xls_file)
+            else:
+                files_uploaded.append([xls_file, row_count])
+
 
         except Exception as e:
             log.error('Error processing geochemistry file ' + xls_file)
@@ -591,28 +593,53 @@ def process_geochem_files(db_conn, files_to_process):
 
 
 # geochemistry spreadsheet row -> DB chemical_data table column
+# geochemistry spreadsheet row -> DB chemical_data table column
 GEOCHEMISTRY_COLUMN_MAP = {
     'Bicarbonate (Total)': 'bicarbonate',
     'Chloride': 'chloride',
     'Sulphate': 'sulfate',
-    'Sulphide (total as H2S)': 'H2S'
+    'Sulphide (total as H2S)': 'H2S',
+    'NH4': 'ammonium',
+    'PO4': 'phosphate',
+    'NO3': 'nitrate',
+    'NO2': 'nitrite'
 }
 
 # Matches 'P1.0023', 'P1-0023', etc
-SAMPLE_NUMBER_RE = re.compile('^P1.(\d{4})$', re.IGNORECASE)
+SAMPLE_NUMBER_RE = re.compile('^\s*P1.(\d{4})\s*$', re.IGNORECASE)
 
 # Matches '1234', '1.234', '.1234', etc
 NUMERIC_RE= re.compile('^[0-9]+|(?:[0-9]*\.[0-9]+)$')
 
 # Matches '<1234', '<1.234', '<.1234', etc
-BELOW_DETECTION_LIMIT_RE = re.compile('^<([0-9]+|(?:[0-9]*\.[0-9]+))$')
+BELOW_DETECTION_LIMIT_RE = re.compile('^\s*<\s*([0-9]+|(?:[0-9]*\.[0-9]+))$')
+
+
+# Returns true if the given worksheet appears to contain data in the GNS NZGAL format
+def is_nzgal_geochem(worksheet):
+    return worksheet.cell_type(0, 0) == xlrd.XL_CELL_TEXT and worksheet.cell_value(0,0) == 'Geochemistry Results'
+
+
+# Returns true if the given worksheet appears to contain data in the Waikato University format
+def is_uow_geochem(worksheet):
+    sample_no_cell_type = worksheet.cell_type(2, 0)
+    first_sample_no = worksheet.cell_value(2, 0)
+    param_cell_type = worksheet.cell_type(0, 1)
+    first_param = worksheet.cell_value(0, 1)
+    return (
+        sample_no_cell_type == xlrd.XL_CELL_TEXT
+        and SAMPLE_NUMBER_RE.match(first_sample_no)
+        and param_cell_type == xlrd.XL_CELL_TEXT
+        and first_param in GEOCHEMISTRY_COLUMN_MAP
+    )
+
 
 # worksheet: xlrd worksheet instance created from an Excel workbook
 # file_name: absolute path of the Excel workbook, just used for error logging.
 #
-# Parses the given worksheet, and inserts relevant results into the database.
+# Parses the given NZGAL format worksheet, and inserts relevant results into the database.
 # Returns the number of records inserted or updated.
-def process_geochem_worksheet(db_conn, worksheet, file_name):
+def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name):
 
     param_column = 0
     geochem_updates = []
@@ -621,46 +648,116 @@ def process_geochem_worksheet(db_conn, worksheet, file_name):
         row_data = {}
         for row_index in range (0, worksheet.nrows):
             parameter_name = worksheet.cell_value(row_index, param_column)
-            if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
-                # result values should be '[numeric value]' or '<[numeric value]
-                # if the concentration is less than the detection limit.
-                # Values below the detection limit are recorded as negative
-                # numbers in the database, e.g '<0.2' is recorded as '-0.2'
-                result = str(worksheet.cell_value(row_index, col_index))
-                if NUMERIC_RE.match(result):
-                    row_data[parameter_name] = result
-                else:
-                    bdl = BELOW_DETECTION_LIMIT_RE.match(result)
-                    if bdl:
-                        row_data[parameter_name] = '-' + bdl.group(1)
-                    else:
-                        raise Exception(
-                            'Unexpected result value "'+result+'" for sample '
-                            + sample_number + ' in ' + file_name
-                            + ' cell ['+row_index+','+col_index+']')
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name)
+            new_sample_number = get_geochem_sample_number(worksheet, row_index, col_index)
+            sample_number = new_sample_number if (new_sample_number!= None) else sample_number
+
+        add_geochem_update_data(geochem_updates, sample_number, row_data, db_conn)
+
+    row_count = perform_geochem_updates(db_conn, geochem_updates)
+
+    return row_count
 
 
-            if worksheet.cell_type(row_index, col_index) == xlrd.XL_CELL_TEXT:
-                sample_match = SAMPLE_NUMBER_RE.match(worksheet.cell_value(row_index, col_index))
-                if (sample_match):
-                    sample_number = 'P1.' + sample_match.group(1)
+# worksheet: xlrd worksheet instance created from an Excel workbook
+# file_name: absolute path of the Excel workbook, just used for error logging.
+#
+# Parses the given Waikato University format worksheet, and inserts relevant results into the database.
+# Returns the number of records inserted or updated.
+def process_uow_geochem_worksheet(db_conn, worksheet, file_name):
 
-        if sample_number != None and len(row_data) > 0:
-            sample = get_sample(db_conn, sample_number)
-            update_data = {
-                'sample_number': sample_number,
-                'sample_id': None,
-                'chem_id': None,
-                'row_data': row_data
-            }
+    param_row = 0
+    sample_num_col = 0
+    geochem_updates = []
+    for row_index in range (2, worksheet.nrows):
+        sample_number = get_geochem_sample_number(worksheet, row_index, sample_num_col)
+        row_data = {}
+        for col_index in range (1, worksheet.ncols):
+            parameter_name = worksheet.cell_value(param_row, col_index)
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name)
 
-            if sample != None:
-                update_data['sample_id'] = sample['id']
-                if sample['chem_id'] != None:
-                    update_data['chem_id'] = sample['chem_id']
+        add_geochem_update_data(geochem_updates, sample_number, row_data, db_conn)
 
-            geochem_updates.append(update_data)
+    row_count = perform_geochem_updates(db_conn, geochem_updates)
 
+    return row_count
+
+
+# row_data: dictionary in the form {parameter_name: result}, e.g: {NH4: 3.69, PO4: 0.343}
+#
+# Reads a result from the given worksheet at the specified [row, column] and
+# adds it to the given row_data.
+def add_geochem_result(row_data, sample_number, parameter_name, worksheet, result_row, result_col, file_name):
+    if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
+        # result values should be '[numeric value]' or '<[numeric value]
+        # if the concentration is less than the detection limit.
+        # Values below the detection limit are recorded as negative
+        # numbers in the database, e.g '<0.2' is recorded as '-0.2'
+        result = str(worksheet.cell_value(result_row, result_col))
+        if NUMERIC_RE.match(result):
+            row_data[parameter_name] = result
+        else:
+            bdl = BELOW_DETECTION_LIMIT_RE.match(result)
+            if bdl:
+                row_data[parameter_name] = '-' + bdl.group(1)
+            else:
+                raise Exception(
+                    'Unexpected result value "'+result+'" for sample '
+                    + sample_number + ' in ' + file_name
+                    + ' cell ['+result_row+','+result_col+']')
+
+
+# Reads a sample number from the given worksheet at the specified [row, column].
+# Returns the sample number in the form 'P1.0123' or None if no valid sample number
+# is found.
+def get_geochem_sample_number(worksheet, row_index, col_index):
+    sample_number = None
+    if worksheet.cell_type(row_index, col_index) == xlrd.XL_CELL_TEXT:
+        sample_match = SAMPLE_NUMBER_RE.match(worksheet.cell_value(row_index, col_index))
+        if (sample_match):
+            sample_number = 'P1.' + sample_match.group(1)
+
+    return sample_number
+
+
+# geochem_updates: list of dictionaries in the form
+#     {'sample_number': e.g 'P1.0123',
+#      'sample_id': SAMPLE.ID value from the database,
+#      'chem_id': CHEMICAL_DATA.ID value from the database,
+#      'row_data': dictionary in the form of row_data parameter below
+#     }
+# sample_number: e.g 'P1.0123'
+# row_data: dictionary in the form {parameter_name: result}, e.g: {NH4: 3.69, PO4: 0.343}
+#
+# Checks the database for existing geochemistry results associated with the
+# given sample number. Adds details to given geochem_updates list.
+def add_geochem_update_data(geochem_updates, sample_number, row_data, db_conn):
+    if sample_number != None and len(row_data) > 0:
+        sample = get_sample(db_conn, sample_number)
+        update_data = {
+            'sample_number': sample_number,
+            'sample_id': None,
+            'chem_id': None,
+            'row_data': row_data
+        }
+
+        if sample != None:
+            update_data['sample_id'] = sample['id']
+            if sample['chem_id'] != None:
+                update_data['chem_id'] = sample['chem_id']
+
+        geochem_updates.append(update_data)
+
+
+# geochem_updates: list of dictionaries in the form
+#     {'sample_number': e.g 'P1.0123',
+#      'sample_id': SAMPLE.ID value from the database, or None,
+#      'chem_id': CHEMICAL_DATA.ID value from the database, or None,
+#      'row_data': dictionary in the form {parameter_name: result}, e.g: {NH4: 3.69, PO4: 0.343}
+#     }
+#
+# Adds the given geochemistry data into the database via inserts or updates.
+def perform_geochem_updates(db_conn, geochem_updates):
     row_count = 0
     with db_conn:
         cursor = db_conn.cursor()
@@ -696,11 +793,6 @@ def get_geochem_update_sql(geochem_id, row):
         values.append(geochem_id)
 
     return sql, values
-
-
-def is_geochem(worksheet):
-    return worksheet.cell_type(0, 0) == xlrd.XL_CELL_TEXT and worksheet.cell_value(0,0) == 'Geochemistry Results'
-
 
 
 #-------------------------------------------------------------------------------
