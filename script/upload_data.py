@@ -347,7 +347,9 @@ SAMPLE_TO_PHYSICAL_COLUMN_MAP = {
     'Ebullition': 'ebullition',
     'FeatureTemperature': 'initialTemp',
     'SoilCollected': 'soilCollected',
-    'WaterColumnCollected': 'waterColumnCollected'
+    'WaterColumnCollected': 'waterColumnCollected',
+    'TotalDissolvedSolids': 'tds',
+    'SettledAt4oC': 'settledAtFourDegC'
 }
 
 COLOUR_RE = re.compile('ff([a-f0-9]{6})', re.IGNORECASE)
@@ -364,6 +366,7 @@ def get_physical_data_insert_sql(db_conn, row):
 
     set_soil_collected(row)
     set_water_column_collected(row)
+    set_settled_at_4_deg(row)
 
     column_names, values = get_column_names_and_values(row, SAMPLE_TO_PHYSICAL_COLUMN_MAP)
     sample = get_sample(db_conn, row['SampleNumber'])
@@ -393,6 +396,11 @@ def set_soil_collected(row):
 
 def set_water_column_collected(row):
     set_boolean_column(row, 'WaterColumnCollected', WATER_COLUMN_COLLECTED_RE, WATER_COLUMN_NOT_COLLECTED_RE)
+
+def set_settled_at_4_deg(row):
+    column_name = 'SettledAt4oC'
+    if column_name in row:
+        row[column_name] = 1 if row[column_name] == 'true' else 0
 
 def set_boolean_column(row, column_name, comment_true_re, comment_false_re):
     if column_name in row:
