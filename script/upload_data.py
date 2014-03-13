@@ -38,6 +38,7 @@ from email.mime.text import MIMEText
 import re
 import codecs
 import base64
+from decimal import Decimal, ROUND_HALF_UP
 
 import MySQLdb
 from PIL import Image
@@ -568,15 +569,15 @@ def process_geochem_files(db_conn, files_to_process):
     for xls_file in files_to_process:
         # open excel spreadsheet - this loads the file into memory then closes it
         try:
-            workbook = xlrd.open_workbook(xls_file)
+            workbook = xlrd.open_workbook(xls_file, formatting_info=True)
             worksheet = workbook.sheet_by_index(0)
             row_count = 0
             if is_nzgal_geochem(worksheet):
                 log.info('Processing NZGAL geochem file ' + xls_file)
-                row_count = process_nzgal_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
+                row_count = process_nzgal_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file), workbook)
             elif is_uow_geochem(worksheet):
                 log.info('Processing UoW geochem file ' + xls_file)
-                row_count = process_uow_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file))
+                row_count = process_uow_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file), workbook)
 
             if row_count == 0:
                 files_skipped.append(xls_file)
@@ -593,23 +594,51 @@ def process_geochem_files(db_conn, files_to_process):
 
 
 # geochemistry spreadsheet row -> DB chemical_data table column
-# geochemistry spreadsheet row -> DB chemical_data table column
 GEOCHEMISTRY_COLUMN_MAP = {
+     # NZGAL data
     'Bicarbonate (Total)': 'bicarbonate',
     'Chloride': 'chloride',
     'Sulphate': 'sulfate',
     'Sulphide (total as H2S)': 'H2S',
+
+    # UoW FIA data
     'NH4': 'ammonium',
     'PO4': 'phosphate',
     'NO3': 'nitrate',
-    'NO2': 'nitrite'
+    'NO2': 'nitrite',
+
+    #UoW ICP-MS data
+    'B 10': 'B',
+    'Na 23': 'Na',
+    'Mg 24': 'Mg',
+    'Al 27': 'Al',
+    'K 39': 'K',
+    'Ca 43': 'Ca',
+    'V 51': 'V',
+    'Cr 52': 'Cr',
+    'Fe 54': 'Fe',
+    'Mn 55': 'Mn',
+    'Co 59': 'cobalt',
+    'Ni 60': 'Ni',
+    'Cu 65': 'Cu',
+    'Zn 66': 'Zn',
+    'As 75': '`As`', # Needs back-tick escaping, since As is an SQL keyword
+    'Se 82': 'Se',
+    'Sr 88': 'Sr',
+    'Ag 109': 'Ag',
+    'Cd 111': 'Cd',
+    'Ba 137': 'Ba',
+    'U 238': 'U'
+    # Tl 205 (thallium), closest column Ti
+    # Pb = Pb 207 + Pb 208?
+    # Fe 54 -> Fe, what about iron2
 }
 
 # Matches 'P1.0023', 'P1-0023', etc
 SAMPLE_NUMBER_RE = re.compile('^\s*P1.(\d{4})\s*$', re.IGNORECASE)
 
 # Matches '1234', '1.234', '.1234', etc
-NUMERIC_RE= re.compile('^[0-9]+|(?:[0-9]*\.[0-9]+)$')
+NUMERIC_RE= re.compile('^-{0,1}(?:[0-9]+|(?:[0-9]*\.[0-9]+))$')
 
 # Matches '<1234', '<1.234', '<.1234', etc
 BELOW_DETECTION_LIMIT_RE = re.compile('^\s*<\s*([0-9]+|(?:[0-9]*\.[0-9]+))$')
@@ -622,16 +651,24 @@ def is_nzgal_geochem(worksheet):
 
 # Returns true if the given worksheet appears to contain data in the Waikato University format
 def is_uow_geochem(worksheet):
-    sample_no_cell_type = worksheet.cell_type(2, 0)
-    first_sample_no = worksheet.cell_value(2, 0)
-    param_cell_type = worksheet.cell_type(0, 1)
-    first_param = worksheet.cell_value(0, 1)
-    return (
-        sample_no_cell_type == xlrd.XL_CELL_TEXT
-        and SAMPLE_NUMBER_RE.match(first_sample_no)
-        and param_cell_type == xlrd.XL_CELL_TEXT
-        and first_param in GEOCHEMISTRY_COLUMN_MAP
-    )
+
+    first_result_row = -1
+    first_result_col = -1
+    for i in range(0, worksheet.nrows - 1):
+        if  SAMPLE_NUMBER_RE.match(worksheet.cell_value(i, 0)):
+            first_result_row = i
+            break
+
+    for i in range(0, worksheet.ncols - 1):
+        if  GEOCHEMISTRY_COLUMN_MAP.has_key(worksheet.cell_value(0, i)):
+            first_result_col = i
+            break
+
+    if first_result_row >= 0 and first_result_col >=0:
+        result = str(worksheet.cell_value(first_result_row, first_result_col))
+        return NUMERIC_RE.match(result) or BELOW_DETECTION_LIMIT_RE.match(result)
+
+    return False
 
 
 # worksheet: xlrd worksheet instance created from an Excel workbook
@@ -639,7 +676,7 @@ def is_uow_geochem(worksheet):
 #
 # Parses the given NZGAL format worksheet, and inserts relevant results into the database.
 # Returns the number of records inserted or updated.
-def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name):
+def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name, workbook):
 
     param_column = 0
     geochem_updates = []
@@ -648,7 +685,7 @@ def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name):
         row_data = {}
         for row_index in range (0, worksheet.nrows):
             parameter_name = worksheet.cell_value(row_index, param_column)
-            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name)
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook)
             new_sample_number = get_geochem_sample_number(worksheet, row_index, col_index)
             sample_number = new_sample_number if (new_sample_number!= None) else sample_number
 
@@ -664,7 +701,7 @@ def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name):
 #
 # Parses the given Waikato University format worksheet, and inserts relevant results into the database.
 # Returns the number of records inserted or updated.
-def process_uow_geochem_worksheet(db_conn, worksheet, file_name):
+def process_uow_geochem_worksheet(db_conn, worksheet, file_name, workbook):
 
     param_row = 0
     sample_num_col = 0
@@ -674,7 +711,7 @@ def process_uow_geochem_worksheet(db_conn, worksheet, file_name):
         row_data = {}
         for col_index in range (1, worksheet.ncols):
             parameter_name = worksheet.cell_value(param_row, col_index)
-            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name)
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook)
 
         add_geochem_update_data(geochem_updates, sample_number, row_data, db_conn)
 
@@ -687,24 +724,48 @@ def process_uow_geochem_worksheet(db_conn, worksheet, file_name):
 #
 # Reads a result from the given worksheet at the specified [row, column] and
 # adds it to the given row_data.
-def add_geochem_result(row_data, sample_number, parameter_name, worksheet, result_row, result_col, file_name):
+def add_geochem_result(row_data, sample_number, parameter_name, worksheet, result_row, result_col, file_name, workbook):
     if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
         # result values should be '[numeric value]' or '<[numeric value]
         # if the concentration is less than the detection limit.
         # Values below the detection limit are recorded as negative
         # numbers in the database, e.g '<0.2' is recorded as '-0.2'
-        result = str(worksheet.cell_value(result_row, result_col))
+        # Values less than 0 are treated as 0
+
+        #result = str(worksheet.cell_value(result_row, result_col))
+        result = read_formatted_value(worksheet, workbook, result_row, result_col)
         if NUMERIC_RE.match(result):
-            row_data[parameter_name] = result
+            if float(result) > 0:
+                row_data[parameter_name] = result
+            else:
+                row_data[parameter_name] = '0.0'
+
         else:
             bdl = BELOW_DETECTION_LIMIT_RE.match(result)
             if bdl:
                 row_data[parameter_name] = '-' + bdl.group(1)
             else:
                 raise Exception(
-                    'Unexpected result value "'+result+'" for sample '
+                    'Unexpected '+parameter_name+' result value "'+result+'" for sample '
                     + sample_number + ' in ' + file_name
-                    + ' cell ['+result_row+','+result_col+']')
+                    + ' cell ['+str(result_row)+','+str(result_col)+']')
+
+
+# Matches '<1234', '<1.234', '<.1234', etc
+NUMBER_FORMAT_RE = re.compile('^0\.(0+)$')
+
+def read_formatted_value(worksheet, workbook, row_index, col_index):
+     xf_index = worksheet.cell_xf_index(row_index, col_index)
+     xf = workbook.xf_list[xf_index] # gets an XF object
+     format_key = xf.format_key
+     formatter = workbook.format_map[format_key] # gets a Format object
+     value = str(worksheet.cell_value(row_index, col_index))
+     is_formatted = NUMBER_FORMAT_RE.match(formatter.format_str)
+     if is_formatted:
+        return str(Decimal(value).quantize(Decimal('1.'+is_formatted.group(1)), rounding=ROUND_HALF_UP))
+
+     else:
+        return value
 
 
 # Reads a sample number from the given worksheet at the specified [row, column].
