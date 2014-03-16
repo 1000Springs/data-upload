@@ -418,6 +418,7 @@ def process_image_files(config, db_conn, files_to_process):
 
     image_config = 'ImageProcessing'
     working_dir = config.get(image_config, 'working_dir')
+    watermark_file = config.get(image_config, 'watermark_file')
     s3_conn = S3Connection(
         config.get(image_config, 'aws_access_key_id'),
         config.get(image_config, 'aws_secret_access_key')
@@ -430,21 +431,35 @@ def process_image_files(config, db_conn, files_to_process):
     files_error = []
     files_skipped = []
     files_to_archive = []
-    for image_file, image_data in files_to_process.iteritems():
-        if (image_data[IMAGE_TYPE] != ''):
+    for raw_image_file, image_data in files_to_process.iteritems():
+        if (image_data[IMAGE_TYPE] == 'BESTPHOTO'):
             sample_id = get_sample_id(db_conn, image_data[IMAGE_SAMPLE_NUMBER])
             if (sample_id != None):
-                upload_image(db_conn, working_dir, image_file, image_data,
-                             sample_id, s3_bucket, s3_folder, s3_bucket_url,
-                             files_uploaded, files_error)
+                # reduce image size
+                image_type = 'BESTPHOTO'
+                new_image_file = os.path.join(working_dir, os.path.basename(raw_image_file))
+                reduce_image(raw_image_file, new_image_file, 400, 300, None)
+                small_uploaded = upload_image(db_conn, new_image_file, image_data,
+                             sample_id, s3_bucket, s3_folder, s3_bucket_url)
+
+                image_data[IMAGE_TYPE]='LARGE'
+                new_image_file = os.path.join(working_dir, os.path.basename(raw_image_file).replace('BESTPHOTO', image_data[IMAGE_TYPE]))
+                reduce_image(raw_image_file, new_image_file, 900, 676, watermark_file)
+                large_uploaded = upload_image(db_conn, new_image_file, image_data,
+                             sample_id, s3_bucket, s3_folder, s3_bucket_url)
+
+                if small_uploaded and large_uploaded:
+                    files_uploaded.append(raw_image_file)
+                else:
+                    files_error.append(raw_image_file)
             else:
                 # sample not in the database...ignore
-                files_skipped.append(image_file)
+                files_skipped.append(raw_image_file)
 
         else:
             # Image not uploaded to S3, but put in files_to_archive so
             # the file is moved to the archive folder
-            files_to_archive.append(image_file)
+            files_to_archive.append(raw_image_file)
 
     return files_uploaded, files_error, files_skipped, files_to_archive
 
@@ -464,12 +479,10 @@ def get_sample_id(db_conn, sample_number):
 #
 # Returns the absolute path of a new image file with reduced size and resolution
 # for easier use on the web.
-def reduce_image(working_dir, raw_image_file):
+def reduce_image(raw_image_file, new_image_file, max_width, height, watermark_file):
     image = Image.open(raw_image_file)
     exif_data = image._getexif()
 
-    height = 300
-    max_width = 400
     image.thumbnail((max_width, height), Image.ANTIALIAS)
 
     # Where the image is in portrait or upside down, we rotate it so it
@@ -485,23 +498,28 @@ def reduce_image(working_dir, raw_image_file):
         elif (orientation == 6):
             image = image.rotate(270)
 
-    reduced_image_file = os.path.join(working_dir, os.path.basename(raw_image_file))
-    image.save(reduced_image_file)
-    return reduced_image_file
+    if watermark_file != None:
+        image = image.convert('RGBA')
+        im_width, im_height = image.size
+        layer = Image.new('RGBA', image.size, (0,0,0,0))
+        watermark = Image.open(watermark_file).convert('RGBA')
+        wm_width, wm_height = watermark.size
+        padding = 30
+        layer.paste(watermark, (im_width - (wm_width + padding), im_height - (wm_height+padding)))
+        image = Image.composite(layer, image, layer)
+
+    image.save(new_image_file)
 
 
 # Uploads the image_file to the given Amazon S3 bucket, and creates
 # an image record in the database
-def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
-                 s3_bucket, s3_folder, s3_bucket_url,
-                 files_uploaded, files_error):
+def upload_image(db_conn, image_file, image_data, sample_id,
+                 s3_bucket, s3_folder, s3_bucket_url):
 
-    reduced_image_file = None
     key = None
+    image_uploaded = False
     try:
         log.info('Processing image file ' + image_file)
-         # reduce image size
-        reduced_image_file = reduce_image(working_dir, image_file)
         # upload reduced image to Amazon S3 bucket
         key = Key(s3_bucket)
         key.key = '/'.join([s3_folder, os.path.basename(image_file)])
@@ -510,7 +528,7 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
             'Content-Type': 'image/jpeg',
             'Cache-Control': 'max-age=864000'
         })
-        key.set_contents_from_filename(reduced_image_file)
+        key.set_contents_from_filename(image_file)
         key.make_public()
         image_url = '/'.join([s3_bucket_url, key.key])
 
@@ -520,18 +538,19 @@ def upload_image(db_conn, working_dir, image_file, image_data, sample_id,
             sql, sql_params = get_image_data_insert_sql(db_conn, sample_id, image_url, image_data)
             cursor.execute(sql, sql_params)
 
-        files_uploaded.append(image_file)
+        image_uploaded = True
 
     except Exception as e:
         log.error('Error processing image file ' + image_file)
         log.exception(e)
-        files_error.append(image_file)
         if key != None:
             key.delete()
 
     finally:
-        if reduced_image_file != None:
-            os.remove(reduced_image_file)
+        if image_file != None:
+            os.remove(image_file)
+
+    return image_uploaded
 
 
 # sample_id: sample.id of the sample the image is associated with.
