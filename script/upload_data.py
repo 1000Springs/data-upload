@@ -474,11 +474,12 @@ def get_sample_id(db_conn, sample_number):
         return sample['id']
 
 
-# working_dir: absolute path of directory for putting reduced images in.
 # raw_image_file: absolute path of an image file.
-#
-# Returns the absolute path of a new image file with reduced size and resolution
-# for easier use on the web.
+# new image_file: absolute path of file to save the reduced image to
+# max_width: maximum width (in pixels) of the reduced image
+# height: height (in pixels) of the reduced image
+# watermark_file: path to file to use to watermark the reduced image, or None
+#                 if no watermark is to be applied
 def reduce_image(raw_image_file, new_image_file, max_width, height, watermark_file):
     image = Image.open(raw_image_file)
     exif_data = image._getexif()
@@ -513,6 +514,9 @@ def reduce_image(raw_image_file, new_image_file, max_width, height, watermark_fi
 
 # Uploads the image_file to the given Amazon S3 bucket, and creates
 # an image record in the database
+#
+# Returns True if both the S3 upload and DB update are successful, otherwise
+# returns False.
 def upload_image(db_conn, image_file, image_data, sample_id,
                  s3_bucket, s3_folder, s3_bucket_url):
 
