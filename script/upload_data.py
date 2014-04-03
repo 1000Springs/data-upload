@@ -188,7 +188,8 @@ FEATURE_COLUMN_MAP = {
     'Description': 'description',
     'AccessType': 'access',
     'District': 'district',
-    'Location': 'location'
+    'Location': 'location',
+    'FeatureType': 'feature_type'
 }
 
 
