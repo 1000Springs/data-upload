@@ -907,9 +907,23 @@ def get_tablet_data_rows(file_path):
         first_line = f.readline().strip()
         column_names = first_line.split('\t')
         for line in f:
-            rows.append(dict(zip(column_names,line.strip().split('\t'))))
+            row = dict(zip(column_names,line.strip().split('\t')))
+            # Values from files edited in Excel end up with surrounding quotes
+            remove_string_quotes(row)
+            rows.append(row)
 
     return rows
+
+
+# row: a map in the form {key => value,
+#       key => values}
+#
+# Removes surrounding quotes from string values.
+def remove_string_quotes(row):
+    for key in row:
+        value = row[key]
+        if isinstance(value, basestring) and value.startswith('"') and value.endswith('"'):
+            row[key] = value[1:-1]
 
 
 # row:  a map in the form {file_column_name_1 => value_1,
@@ -1102,7 +1116,8 @@ def db_connect(config):
         user=config.get(db_section, 'user'),
         passwd=config.get(db_section, 'password'),
         db=config.get(db_section, 'db'),
-        charset='utf8'
+        charset='utf8',
+        sql_mode='STRICT_ALL_TABLES'
         )
 
 MOUNT_SECTION = 'DataShare'
