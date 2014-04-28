@@ -38,7 +38,7 @@ from email.mime.text import MIMEText
 import re
 import codecs
 import base64
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 import MySQLdb
 from PIL import Image
@@ -694,13 +694,14 @@ def is_uow_geochem(worksheet):
             break
 
     for i in range(0, worksheet.ncols - 1):
-        if  GEOCHEMISTRY_COLUMN_MAP.has_key(worksheet.cell_value(0, i)):
+        element_name = worksheet.cell_value(0, i)
+        if  GEOCHEMISTRY_COLUMN_MAP.has_key(element_name):
             first_result_col = i
             break
 
     if first_result_row >= 0 and first_result_col >=0:
         result = str(worksheet.cell_value(first_result_row, first_result_col))
-        return NUMERIC_RE.match(result) or BELOW_DETECTION_LIMIT_RE.match(result)
+        return interpret_geochem_result(result) != None
 
     return False
 
@@ -740,7 +741,7 @@ def process_uow_geochem_worksheet(db_conn, worksheet, file_name, workbook):
     param_row = 0
     sample_num_col = 0
     geochem_updates = []
-    for row_index in range (2, worksheet.nrows):
+    for row_index in range (1, worksheet.nrows):
         sample_number = get_geochem_sample_number(worksheet, row_index, sample_num_col)
         row_data = {}
         for col_index in range (1, worksheet.ncols):
@@ -768,24 +769,17 @@ def add_geochem_result(row_data, sample_number, parameter_name, worksheet, resul
 
         #result = str(worksheet.cell_value(result_row, result_col))
         result = read_formatted_value(worksheet, workbook, result_row, result_col)
-        if NUMERIC_RE.match(result):
-            if float(result) > 0:
-                row_data[parameter_name] = result
-            else:
-                row_data[parameter_name] = '0.0'
-
+        result = interpret_geochem_result(result)
+        if result is None:
+            raise Exception(
+                'Unexpected '+parameter_name+' result value "'+result+'" for sample '
+                + sample_number + ' in ' + file_name
+                + ' cell ['+str(result_row)+','+str(result_col)+']')
         else:
-            bdl = BELOW_DETECTION_LIMIT_RE.match(result)
-            if bdl:
-                row_data[parameter_name] = '-' + bdl.group(1)
-            else:
-                raise Exception(
-                    'Unexpected '+parameter_name+' result value "'+result+'" for sample '
-                    + sample_number + ' in ' + file_name
-                    + ' cell ['+str(result_row)+','+str(result_col)+']')
+            row_data[parameter_name] = result
 
 
-# Matches '<1234', '<1.234', '<.1234', etc
+# Matches '0.00', '0.000', etc
 NUMBER_FORMAT_RE = re.compile('^0\.(0+)$')
 
 def read_formatted_value(worksheet, workbook, row_index, col_index):
@@ -795,11 +789,35 @@ def read_formatted_value(worksheet, workbook, row_index, col_index):
      formatter = workbook.format_map[format_key] # gets a Format object
      value = str(worksheet.cell_value(row_index, col_index))
      is_formatted = NUMBER_FORMAT_RE.match(formatter.format_str)
-     if is_formatted:
-        return str(Decimal(value).quantize(Decimal('1.'+is_formatted.group(1)), rounding=ROUND_HALF_UP))
+     try:
+        if is_formatted:
+            value = str(Decimal(value).quantize(Decimal('1.'+is_formatted.group(1)), rounding=ROUND_HALF_UP))
+     except InvalidOperation:
+        pass
 
-     else:
-        return value
+     return value
+
+
+# Returns:
+#  '-0.004' if result = '<0.004'
+#  '0.0' if result = '-0.004'
+#  '0.004' if result = '0.004'
+#   Any other format, returns None
+def interpret_geochem_result(result):
+    interpreted_result = None
+    bdl = BELOW_DETECTION_LIMIT_RE.match(result)
+    if bdl:
+        interpreted_result = '-' + bdl.group(1)
+    else:
+        try:
+            if float(result) > 0:
+                interpreted_result = result
+            else:
+                interpreted_result = '0.0'
+        except ValueError:
+            pass
+
+    return interpreted_result
 
 
 # Reads a sample number from the given worksheet at the specified [row, column].
