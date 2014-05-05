@@ -654,6 +654,7 @@ GEOCHEMISTRY_COLUMN_MAP = {
     'Mn 55': 'Mn',
     'Co 59': 'cobalt',
     'Ni 60': 'Ni',
+    'Cu 63': 'Cu',
     'Cu 65': 'Cu',
     'Zn 66': 'Zn',
     'As 75': '`As`', # Needs back-tick escaping, since As is an SQL keyword
@@ -662,10 +663,19 @@ GEOCHEMISTRY_COLUMN_MAP = {
     'Ag 109': 'Ag',
     'Cd 111': 'Cd',
     'Ba 137': 'Ba',
-    'U 238': 'U'
-    # Tl 205 (thallium), closest column Ti
-    # Pb = Pb 207 + Pb 208?
-    # Fe 54 -> Fe, what about iron2
+    'Li 7': 'Li',
+    'Si 28': 'Si',
+    'Fe 54': 'Fe',
+    'Br 79': 'Br',
+    'Mo 98': 'Mo',
+    'La 139': 'La',
+    'Tl 205': 'thallium',
+    'Pb 207': 'Pb',
+    'U 238': 'U',
+    'S 32': 'S',
+    'Rb 85': 'Rb',
+    'Cs 133': 'Cs',
+    'Hg 202': 'Hg'
 }
 
 # Matches 'P1.0023', 'P1-0023', etc
@@ -769,14 +779,14 @@ def add_geochem_result(row_data, sample_number, parameter_name, worksheet, resul
 
         #result = str(worksheet.cell_value(result_row, result_col))
         result = read_formatted_value(worksheet, workbook, result_row, result_col)
-        result = interpret_geochem_result(result)
+        interpreted_result = interpret_geochem_result(result)
         if result is None:
             raise Exception(
                 'Unexpected '+parameter_name+' result value "'+result+'" for sample '
                 + sample_number + ' in ' + file_name
                 + ' cell ['+str(result_row)+','+str(result_col)+']')
         else:
-            row_data[parameter_name] = result
+            row_data[parameter_name] = interpreted_result
 
 
 # Matches '0.00', '0.000', etc
