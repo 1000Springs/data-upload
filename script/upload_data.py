@@ -73,13 +73,16 @@ def main():
         add_upload_summary('Sample', s_files_uploaded, s_files_error, [])
 
         g_files_uploaded, g_files_error, g_files_skipped = process_geochem_files(db_conn, other_xls_files)
-        add_upload_summary('Geochemistry', g_files_uploaded, g_files_error, g_files_skipped)
+        t_files_uploaded, t_files_error, t_files_skipped = process_taxonomy_files(db_conn, other_xls_files)
+        xls_files_skipped = [f for f in g_files_skipped if f in t_files_skipped]
+        add_upload_summary('Geochemistry', g_files_uploaded, g_files_error, xls_files_skipped)
+        add_upload_summary('Taxonomy', t_files_uploaded, t_files_error, [])
 
         i_files_uploaded, i_files_error, i_files_skipped, i_files_to_archive = process_image_files(config, db_conn, image_files)
         add_upload_summary('Image',  i_files_uploaded, i_files_error, i_files_skipped)
 
-        move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded, get_archive_dir(config))
-        move_files(f_files_error + s_files_error + i_files_error + g_files_error, get_error_dir(config))
+        move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded + t_files_uploaded, get_archive_dir(config))
+        move_files(f_files_error + s_files_error + i_files_error + g_files_error + t_files_error, get_error_dir(config))
 
         if feature_files or sample_files or image_files or other_xls_files:
             send_upload_notification(config)
@@ -603,13 +606,16 @@ def process_geochem_files(db_conn, files_to_process):
     for xls_file in files_to_process:
         # open excel spreadsheet - this loads the file into memory then closes it
         try:
-            workbook = xlrd.open_workbook(xls_file, formatting_info=True)
+            # xlrd can't handle formatting info from Excel 2007+ workbooks
+            is_xlsx_file = xls_file.endswith('.xlsx')
+            workbook = xlrd.open_workbook(xls_file, formatting_info=(not is_xlsx_file))
             worksheet = workbook.sheet_by_index(0)
             row_count = 0
             if is_nzgal_geochem(worksheet):
                 log.info('Processing NZGAL geochem file ' + xls_file)
                 row_count = process_nzgal_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file), workbook)
-            elif is_uow_geochem(worksheet):
+            # UoW worksheets use formatted values, so we can only process them if in .xls format
+            elif not is_xlsx_file and is_uow_geochem(worksheet):
                 log.info('Processing UoW geochem file ' + xls_file)
                 row_count = process_uow_geochem_worksheet(db_conn, worksheet, get_relative_path(xls_file), workbook)
 
@@ -919,6 +925,186 @@ def get_geochem_update_sql(geochem_id, row):
 
 
 #-------------------------------------------------------------------------------
+# TAXONOMY/DNA FILE PROCESSING
+#-------------------------------------------------------------------------------
+def process_taxonomy_files(db_conn, files_to_process):
+    files_uploaded = []
+    files_error = []
+    files_skipped = []
+    for xls_file in files_to_process:
+        # open excel spreadsheet - this loads the file into memory then closes it
+        try:
+            # xlrd can't handle formatting info from Excel 2007+ workbooks
+            is_xlsx_file = xls_file.endswith('.xlsx')
+            workbook = xlrd.open_workbook(xls_file, formatting_info=(not is_xlsx_file))
+            worksheet = workbook.sheet_by_index(0)
+            row_count = 0
+            if is_taxonomy(worksheet):
+                log.info('Processing taxonomy data file ' + xls_file)
+                row_count = process_taxonomy_worksheet(db_conn, worksheet, get_relative_path(xls_file), workbook)
+
+            if row_count == 0:
+                files_skipped.append(xls_file)
+            else:
+                files_uploaded.append([xls_file, row_count])
+
+
+        except Exception as e:
+            log.error('Error processing taxonomy file ' + xls_file)
+            log.exception(e)
+            files_error.append(xls_file)
+
+    return files_uploaded, files_error, files_skipped
+
+# Returns true if the given worksheet appears to contain data in the taxonomy/DNA format
+def is_taxonomy(worksheet):
+    taxonomy_columns, sample_columns = get_taxonomy_columns(worksheet)
+    found_all_taxonomy_columns = len(taxonomy_columns) == len(TAXONOMY_COLUMN_MAP)
+    found_sample_column = len(sample_columns) > 0
+    return found_all_taxonomy_columns and found_sample_column
+
+# Matches 'OTU_25', 'OTU_789' etc
+OTU_ID_RE = re.compile('OTU_\d+', re.IGNORECASE)
+
+# Matches 'P1.0023_60', 'P1.0023_64', etc
+TAXONOMY_SAMPLE_NUMBER_RE = re.compile('^\s*P1.(\d{4}).*$', re.IGNORECASE)
+
+# worksheet: xlrd worksheet instance created from an Excel workbook
+# file_name: absolute path of the Excel workbook
+#
+# Parses the given taxonomy worksheet, and inserts relevant results into the database.
+# Returns the number of records inserted or updated.
+def process_taxonomy_worksheet(db_conn, worksheet, file_name, workbook):
+
+    taxonomy_updates = []
+    taxonomy_columns, sample_columns = get_taxonomy_columns(worksheet)
+    # Parse worksheet contents to extract data
+    for row_index in range (1, worksheet.nrows):
+        otu_id = worksheet.cell_value(row_index, taxonomy_columns['otu_id'])
+        if OTU_ID_RE.match(otu_id):
+            taxonomy_data = {
+                'otu_id': otu_id,
+                'data_file_name': remove_file_type(file_name)
+            }
+            for db_column_name, sheet_column_index in taxonomy_columns.iteritems():
+                    value = str(worksheet.cell_value(row_index, sheet_column_index))
+                    if len(value) == 0:
+                        value = None
+                    elif db_column_name.endswith('_confidence'):
+                        value = float(value)
+                    taxonomy_data[db_column_name] = value
+
+            sample_taxonomy_data = []
+            for sample_number, sample_column_index in sample_columns.iteritems():
+                read_count = int(worksheet.cell_value(row_index, sample_column_index))
+                if read_count > 0:
+                    sample_taxonomy_data.append({
+                        'sample_number': sample_number,
+                        'read_count':read_count
+                    })
+
+            taxonomy_updates.append({
+                'taxonomy_data': taxonomy_data,
+                'sample_taxonomy_data': sample_taxonomy_data
+                })
+
+    # Perform database inserts
+    row_count = perform_taxonomy_updates(db_conn, taxonomy_updates)
+
+    return row_count
+
+# taxonomy spreadsheet column -> DB taxonomy table column
+TAXONOMY_COLUMN_MAP = {
+    'OTUId': 'otu_id',
+    'Domain': 'domain',
+    'DomainConf': 'domain_confidence',
+    'Phylum': 'phylum',
+    'PhylumConf': 'phylum_confidence',
+    'Class': 'class',
+    'ClassConf': 'class_confidence',
+    'Order': 'order',
+    'OrderConf': 'order_confidence',
+    'Family': 'family',
+    'FamilyConf': 'family_confidence',
+    'Genus': 'genus',
+    'GenusConf': 'genus_confidence',
+    'Species': 'species',
+    'SpeciesConf': 'species_confidence'
+}
+
+
+# worksheet: xlrd worksheet instance created from an Excel workbook
+#
+# Iterates over the given worksheet's header row looking for expected column
+# names. Returns a map in the form {database_column_name: worksheet_column_index}
+def get_taxonomy_columns(worksheet, header_row_index = 0):
+
+    taxonomy_columns = {}
+    sample_columns = {}
+    for col_index in range (0, worksheet.ncols):
+        col_name = str(worksheet.cell_value(header_row_index, col_index))
+        sample_number = TAXONOMY_SAMPLE_NUMBER_RE.match(col_name)
+        if (sample_number):
+            sample_columns['P1.'+sample_number.group(1)] = col_index
+
+        elif col_name in TAXONOMY_COLUMN_MAP:
+            taxonomy_columns[TAXONOMY_COLUMN_MAP[col_name]] = col_index
+
+    return taxonomy_columns, sample_columns
+
+# taxonomy_updates: list of dictionaries in the form
+#     {
+#        'taxonomy_data': {
+#            'otu_id': 'OTU_670',
+#            'data_file_name': 'R1R2_Production_OTUtable',
+#            'domain': 'Bacteria',
+#            'domain_confidence': 0.99,
+#            ...+ phylum, class, order etc.
+#         },
+#        'sample_taxonomy_data': [
+#            {
+#                'sample_number': 'P1.0001',
+#                'read_count': '23'
+#            },
+#            {
+#                'sample_number': 'P1.0021',
+#                'read_count': '517'
+#            }
+#        ]
+#     }
+#
+# Adds the given taxonomy data into the database via inserts or updates.
+def perform_taxonomy_updates(db_conn, taxonomy_updates):
+    row_count = 0
+    with db_conn:
+        cursor = db_conn.cursor()
+
+        for update_data in taxonomy_updates:
+            # insert taxonomy record
+            sql, sql_params = get_insert_sql('taxonomy', update_data['taxonomy_data'])
+            cursor.execute(sql, sql_params)
+            taxonomy_id = db_conn.insert_id()
+
+            # insert sample_taxonomy records
+            for sample_taxonomy_data in update_data['sample_taxonomy_data']:
+                sample_number = sample_taxonomy_data.pop('sample_number')
+                sample = get_sample(db_conn, sample_number)
+                if sample is None:
+                    sample_taxonomy_data['sample_id'] = insert_dummy_sample(db_conn, cursor, sample_number)
+                else:
+                    sample_taxonomy_data['sample_id'] = sample['id']
+
+                sample_taxonomy_data['taxonomy_id'] = taxonomy_id
+                sql, sql_params = get_insert_sql('sample_taxonomy', sample_taxonomy_data)
+                cursor.execute(sql, sql_params)
+
+            # only count the taxonomy updates, as this will match the row count in the spreadsheet
+            row_count += 1
+
+    return row_count
+
+
+#-------------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 #-------------------------------------------------------------------------------
 
@@ -970,6 +1156,14 @@ def get_column_names_and_values(row, column_map):
             values.append(value)
 
     return column_names, values
+
+# table_name: database table name
+# value_map: dictionary in the form {database_column_name: value_to_insert}
+#
+# Returns a tuple in the form (the SQL statement to execute the insert, list of insert parameters)
+def get_insert_sql(table_name, value_map):
+    sql = 'insert into `'+table_name+'` (`' + '`,`'.join(value_map.keys()) + '`) values ('+ ','.join(['%s']*len(value_map.keys())) +')'
+    return sql, value_map.values()
 
 
 # file_type: e.g 'Feature' or 'Sample'
@@ -1028,6 +1222,15 @@ def get_sample(db_conn, sample_number):
 
     finally:
         cursor.close()
+
+# sample_number: e.g 'P1.0025'
+# Inserts a sample record with just the sample number into the database's sample table
+def insert_dummy_sample(db_conn, cursor, sample_number):
+    cursor.execute(
+        'insert into sample (sample_number, date_gathered, sampler) values (%s, now(), %s)',
+        [sample_number, 'Unknown']
+        )
+    return db_conn.insert_id()
 
 def send_error_notification(log_file_name, config):
     try:
@@ -1184,6 +1387,9 @@ def get_sub_dir(config, dir_type):
     global MOUNT_SECTION
     base_dir = mount_data_share(config)
     return os.path.join(base_dir, config.get(MOUNT_SECTION, dir_type))
+
+def remove_file_type(file_name):
+    return os.path.splitext(os.path.basename(file_name))[0]
 
 def move_files(file_list, output_dir):
     for file_data in file_list:
