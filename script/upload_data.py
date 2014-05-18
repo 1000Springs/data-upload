@@ -64,7 +64,7 @@ def main():
         db_conn = db_connect(config)
         new_files_dir = get_new_files_dir(config)
 
-        feature_files, sample_files, image_files, other_xls_files, thumbsdb_cruft_files = find_files(new_files_dir)
+        feature_files, sample_files, image_files, other_xls_files, thumbsdb_cruft_files, dna_sequence_files = find_files(new_files_dir)
 
         f_files_uploaded, f_files_error = process_feature_files(db_conn, feature_files)
         add_upload_summary('Feature',  f_files_uploaded, f_files_error, [])
@@ -78,13 +78,16 @@ def main():
         add_upload_summary('Geochemistry', g_files_uploaded, g_files_error, xls_files_skipped)
         add_upload_summary('Taxonomy', t_files_uploaded, t_files_error, [])
 
+        d_files_uploaded, d_files_error = process_dna_sequence_files(db_conn, dna_sequence_files)
+        add_upload_summary('DNA sequence', d_files_uploaded, d_files_error, [])
+
         i_files_uploaded, i_files_error, i_files_skipped, i_files_to_archive = process_image_files(config, db_conn, image_files)
         add_upload_summary('Image',  i_files_uploaded, i_files_error, i_files_skipped)
 
-        move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded + t_files_uploaded, get_archive_dir(config))
-        move_files(f_files_error + s_files_error + i_files_error + g_files_error + t_files_error, get_error_dir(config))
+        move_files(f_files_uploaded + s_files_uploaded + i_files_uploaded + i_files_to_archive + g_files_uploaded + t_files_uploaded + d_files_uploaded, get_archive_dir(config))
+        move_files(f_files_error + s_files_error + i_files_error + g_files_error + t_files_error + d_files_error, get_error_dir(config))
 
-        if feature_files or sample_files or image_files or other_xls_files:
+        if feature_files or sample_files or image_files or other_xls_files or dna_sequence_files:
             send_upload_notification(config)
 
         process_thumbsdb_cruft_files(thumbsdb_cruft_files)
@@ -121,11 +124,13 @@ def find_files(new_files_dir):
     other_xls_file_re = re.compile('.*\.xls')
     thumbsdb_cruft_file_re = re.compile('Thumbs\.db')
     image_file_re = re.compile('(P1\.\d{4})_([A-Z]*)_\d+\.jpg')
+    dna_sequence_file_re = re.compile('^.*\.fasta$')
     feature_files = []
     sample_files = []
     other_xls_files = []
     thumbsdb_cruft_files = []
     image_files = {}
+    dna_sequence_files = []
     for dirpath, dirnames, filenames in os.walk(new_files_dir):
         for filename in filenames:
             file_path = os.path.join(dirpath,filename)
@@ -138,6 +143,9 @@ def find_files(new_files_dir):
             elif (other_xls_file_re.match(filename)):
                 other_xls_files.append(file_path)
 
+            elif (dna_sequence_file_re.match(filename)):
+                dna_sequence_files.append(file_path)
+
             elif (thumbsdb_cruft_file_re.match(filename)):
                 thumbsdb_cruft_files.append(file_path)
 
@@ -149,7 +157,7 @@ def find_files(new_files_dir):
                         IMAGE_TYPE: image.group(2)
                     }
 
-    return feature_files, sample_files, image_files, other_xls_files, thumbsdb_cruft_files
+    return feature_files, sample_files, image_files, other_xls_files, thumbsdb_cruft_files, dna_sequence_files
 
 
 #-------------------------------------------------------------------------------
@@ -925,7 +933,7 @@ def get_geochem_update_sql(geochem_id, row):
 
 
 #-------------------------------------------------------------------------------
-# TAXONOMY/DNA FILE PROCESSING
+# TAXONOMY FILE PROCESSING
 #-------------------------------------------------------------------------------
 def process_taxonomy_files(db_conn, files_to_process):
     files_uploaded = []
@@ -1080,10 +1088,19 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
         cursor = db_conn.cursor()
 
         for update_data in taxonomy_updates:
-            # insert taxonomy record
-            sql, sql_params = get_insert_sql('taxonomy', update_data['taxonomy_data'])
-            cursor.execute(sql, sql_params)
-            taxonomy_id = db_conn.insert_id()
+            # insert or update taxonomy record
+            taxonomy_data =  update_data['taxonomy_data']
+            existing_taxonomy = get_taxonomy(db_conn, taxonomy_data['data_file_name'], taxonomy_data['otu_id'])
+            if existing_taxonomy is None:
+                sql, sql_params = get_insert_sql('taxonomy', taxonomy_data)
+                cursor.execute(sql, sql_params)
+                taxonomy_id = db_conn.insert_id()
+                new_taxonomy = True
+            else:
+                taxonomy_id = existing_taxonomy['id']
+                sql, sql_params = get_update_sql('id', taxonomy_id, 'taxonomy', taxonomy_data)
+                cursor.execute(sql, sql_params)
+                new_taxonomy = False
 
             # insert sample_taxonomy records
             for sample_taxonomy_data in update_data['sample_taxonomy_data']:
@@ -1095,13 +1112,74 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
                     sample_taxonomy_data['sample_id'] = sample['id']
 
                 sample_taxonomy_data['taxonomy_id'] = taxonomy_id
+
                 sql, sql_params = get_insert_sql('sample_taxonomy', sample_taxonomy_data)
+                if not new_taxonomy:
+                    existing_sample_taxonomy = get_sample_taxonomy(db_conn, sample_taxonomy_data['sample_id'], taxonomy_id)
+                    if existing_sample_taxonomy is not None:
+                        sql, sql_params = get_update_sql('id', existing_sample_taxonomy['id'], 'sample_taxonomy', sample_taxonomy_data)
+
                 cursor.execute(sql, sql_params)
 
             # only count the taxonomy updates, as this will match the row count in the spreadsheet
             row_count += 1
 
     return row_count
+
+
+#-------------------------------------------------------------------------------
+# DNA SEQUENCE FILE PROCESSING
+#-------------------------------------------------------------------------------
+
+# Matches '>OTU_670', '>OTU_25', etc
+OTU_ID_LINE_RE = re.compile('^>(OTU_\d+)$', re.IGNORECASE)
+
+def process_dna_sequence_files(db_conn, files_to_process):
+    files_uploaded = []
+    files_error = []
+    for dna_sequence_file in files_to_process:
+        try:
+            record_count = perform_dna_sequence_updates(db_conn, dna_sequence_file)
+            files_uploaded.append([dna_sequence_file, record_count])
+        except Exception as e:
+            log.error('Error processing DNA sequence file ' + dna_sequence_file)
+            log.exception(e)
+            files_error.append(dna_sequence_file)
+
+    return files_uploaded, files_error
+
+def perform_dna_sequence_updates(db_conn, dna_sequence_file):
+
+    file_name = remove_file_type(dna_sequence_file)
+    record_count = 0
+
+    with db_conn:
+        cursor = db_conn.cursor()
+        otu_id = None
+        dna_sequence = None
+        with open(dna_sequence_file) as f:
+            log.info('Processing DNA sequence data file ' + dna_sequence_file)
+            for line in f:
+                otu_id_line = OTU_ID_LINE_RE.match(line)
+                if otu_id_line:
+                    if otu_id is not None:
+                        update_dna_sequence(cursor, file_name, otu_id, dna_sequence)
+                        record_count += 1
+
+                    otu_id = otu_id_line.group(1)
+                    dna_sequence = ''
+                else:
+                    dna_sequence += line.strip()
+
+        update_dna_sequence(cursor, file_name, otu_id, dna_sequence)
+        record_count += 1
+
+    return record_count
+
+
+def update_dna_sequence(cursor, file_name, otu_id, dna_sequence):
+    sql = 'update taxonomy set sequence=%s where data_file_name like %s and otu_id=%s'
+    cursor.execute(sql, [dna_sequence, file_name + '%', otu_id])
 
 
 #-------------------------------------------------------------------------------
@@ -1165,6 +1243,15 @@ def get_insert_sql(table_name, value_map):
     sql = 'insert into `'+table_name+'` (`' + '`,`'.join(value_map.keys()) + '`) values ('+ ','.join(['%s']*len(value_map.keys())) +')'
     return sql, value_map.values()
 
+# id_col_name: primary key column of database table
+# id_value: primary key of row to be updated
+# table name: database table name
+# value_map: dictionary in the form {database_column_name: update_value}
+#
+# Returns a tuple in the form (the SQL statement to execute the update, list of update parameters)
+def get_update_sql(id_col_name, id_value, table_name, value_map):
+    sql = 'update `'+table_name+'` set `' + '`=%s,`'.join(value_map.keys()) + '`=%s where `'+id_col_name+'`=%s'
+    return sql, value_map.values() + [id_value]
 
 # file_type: e.g 'Feature' or 'Sample'
 # Adds file upload statistics to the email notification sent out for the upload.
@@ -1206,15 +1293,46 @@ def add_to_notification(msg_line):
 # Returns the sample record with the given sample_number, or None if no such
 # record exists. Returned value is a dict of columns from the DB, e.g:
 #   {
-#     id: 1583
-#     sample_number: 'P1.0023'
+#     id: 1583,
+#     sample_number: 'P1.0023',
 #     location_id: 916
 #     ...
 #  }
 def get_sample(db_conn, sample_number):
+    return get_db_row(db_conn, 'select * from sample where sample_number=%s', sample_number)
+
+# file_name: name of the file the taxonomy data originated from (without file type suffix), e.g 'R1R2_Production_OTU'
+# otu_id: e.g 'OTU_670'
+# Returns the taxonomy record with the data_file_name and otu_id attributes, or None if no such
+# record exists. Returned value is a dict of columns from the DB, e.g:
+#   {
+#     id: 7,
+#     domain: 'Bacteria',
+#     domain_confidence: 0.99
+#     ...
+#  }
+def get_taxonomy(db_conn, file_name, otu_id):
+    sql = 'select * from taxonomy where data_file_name like %s and otu_id=%s'
+    return get_db_row(db_conn, sql, [file_name + '%', otu_id])
+
+# sample_id: sample.id DB column value
+# taxonomy_id: taxonomy.id DB column value
+# Returns the sample_taxonomy record with the given attributes, or None if no such
+# record exists. Returned value is a dict of columns from the DB, e.g:
+#   {
+#     id: 7,
+#     sample_id: 15,
+#     taxonomy_id: 23,
+#     read_count: 568
+#  }
+def get_sample_taxonomy(db_conn, sample_id, taxonomy_id):
+    sql = 'select * from sample_taxonomy where sample_id=%s and taxonomy_id=%s'
+    return get_db_row(db_conn, sql, [sample_id, taxonomy_id])
+
+def get_db_row(db_conn, sql, sql_params):
     cursor = db_conn.cursor()
     try:
-        cursor.execute('select * from sample where sample_number=%s', sample_number)
+        cursor.execute(sql, sql_params)
         rows = cursor.fetchall()
         if len(rows) == 0:
             return None
@@ -1222,6 +1340,7 @@ def get_sample(db_conn, sample_number):
 
     finally:
         cursor.close()
+
 
 # sample_number: e.g 'P1.0025'
 # Inserts a sample record with just the sample number into the database's sample table
