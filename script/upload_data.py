@@ -739,12 +739,13 @@ def process_nzgal_geochem_worksheet(db_conn, worksheet, file_name, workbook):
 
     param_column = 0
     geochem_updates = []
+    use_formatting = False
     for col_index in range (2, worksheet.ncols):
         sample_number = None
         row_data = {}
         for row_index in range (0, worksheet.nrows):
             parameter_name = worksheet.cell_value(row_index, param_column)
-            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook)
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook, use_formatting)
             new_sample_number = get_geochem_sample_number(worksheet, row_index, col_index)
             sample_number = new_sample_number if (new_sample_number!= None) else sample_number
 
@@ -765,12 +766,13 @@ def process_uow_geochem_worksheet(db_conn, worksheet, file_name, workbook):
     param_row = 0
     sample_num_col = 0
     geochem_updates = []
+    use_formatting = True
     for row_index in range (1, worksheet.nrows):
         sample_number = get_geochem_sample_number(worksheet, row_index, sample_num_col)
         row_data = {}
         for col_index in range (1, worksheet.ncols):
             parameter_name = worksheet.cell_value(param_row, col_index)
-            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook)
+            add_geochem_result(row_data, sample_number, parameter_name, worksheet, row_index, col_index, file_name, workbook, use_formatting)
 
         add_geochem_update_data(geochem_updates, sample_number, row_data, db_conn)
 
@@ -783,7 +785,7 @@ def process_uow_geochem_worksheet(db_conn, worksheet, file_name, workbook):
 #
 # Reads a result from the given worksheet at the specified [row, column] and
 # adds it to the given row_data.
-def add_geochem_result(row_data, sample_number, parameter_name, worksheet, result_row, result_col, file_name, workbook):
+def add_geochem_result(row_data, sample_number, parameter_name, worksheet, result_row, result_col, file_name, workbook, use_formatting):
     if (sample_number != None and parameter_name in GEOCHEMISTRY_COLUMN_MAP):
         # result values should be '[numeric value]' or '<[numeric value]
         # if the concentration is less than the detection limit.
@@ -792,7 +794,7 @@ def add_geochem_result(row_data, sample_number, parameter_name, worksheet, resul
         # Values less than 0 are treated as 0
 
         #result = str(worksheet.cell_value(result_row, result_col))
-        result = read_formatted_value(worksheet, workbook, result_row, result_col)
+        result = read_value(worksheet, workbook, result_row, result_col, use_formatting)
         interpreted_result = interpret_geochem_result(result)
         if result is None:
             raise Exception(
@@ -806,20 +808,25 @@ def add_geochem_result(row_data, sample_number, parameter_name, worksheet, resul
 # Matches '0.00', '0.000', etc
 NUMBER_FORMAT_RE = re.compile('^0\.(0+)$')
 
-def read_formatted_value(worksheet, workbook, row_index, col_index):
-     xf_index = worksheet.cell_xf_index(row_index, col_index)
-     xf = workbook.xf_list[xf_index] # gets an XF object
-     format_key = xf.format_key
-     formatter = workbook.format_map[format_key] # gets a Format object
-     value = str(worksheet.cell_value(row_index, col_index))
-     is_formatted = NUMBER_FORMAT_RE.match(formatter.format_str)
-     try:
-        if is_formatted:
-            value = str(Decimal(value).quantize(Decimal('1.'+is_formatted.group(1)), rounding=ROUND_HALF_UP))
-     except InvalidOperation:
-        pass
+def read_value(worksheet, workbook, row_index, col_index, use_formatting):
 
-     return value
+    if use_formatting:
+        xf_index = worksheet.cell_xf_index(row_index, col_index)
+        xf = workbook.xf_list[xf_index] # gets an XF object
+        format_key = xf.format_key
+        formatter = workbook.format_map[format_key] # gets a Format object
+        value = str(worksheet.cell_value(row_index, col_index))
+        is_formatted = NUMBER_FORMAT_RE.match(formatter.format_str)
+        if is_formatted:
+            try:
+                value = str(Decimal(value).quantize(Decimal('1.'+is_formatted.group(1)), rounding=ROUND_HALF_UP))
+            except InvalidOperation:
+                pass
+
+    else:
+        value = worksheet.cell_value(row_index, col_index)
+
+    return value
 
 
 # Returns:
@@ -1017,6 +1024,7 @@ def process_taxonomy_worksheet(db_conn, worksheet, file_name, workbook):
                 })
 
     # Perform database inserts
+    log.info('Finished extracting data from ' + file_name)
     row_count = perform_taxonomy_updates(db_conn, taxonomy_updates)
 
     return row_count
@@ -1121,6 +1129,8 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
 
                 cursor.execute(sql, sql_params)
 
+            log.info('Linked ' + str(len(update_data['sample_taxonomy_data'])) + ' samples to taxonomy data ' +
+                taxonomy_data['otu_id'] + ' from ' + taxonomy_data['data_file_name'])
             # only count the taxonomy updates, as this will match the row count in the spreadsheet
             row_count += 1
 
