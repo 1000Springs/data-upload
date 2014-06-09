@@ -1098,17 +1098,9 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
         for update_data in taxonomy_updates:
             # insert or update taxonomy record
             taxonomy_data =  update_data['taxonomy_data']
-            existing_taxonomy = get_taxonomy(db_conn, taxonomy_data['data_file_name'], taxonomy_data['otu_id'])
-            if existing_taxonomy is None:
-                sql, sql_params = get_insert_sql('taxonomy', taxonomy_data)
-                cursor.execute(sql, sql_params)
-                taxonomy_id = db_conn.insert_id()
-                new_taxonomy = True
-            else:
-                taxonomy_id = existing_taxonomy['id']
-                sql, sql_params = get_update_sql('id', taxonomy_id, 'taxonomy', taxonomy_data)
-                cursor.execute(sql, sql_params)
-                new_taxonomy = False
+            sql, sql_params = get_insert_sql('taxonomy', taxonomy_data)
+            cursor.execute(sql, sql_params)
+            taxonomy_id = db_conn.insert_id()
 
             # insert sample_taxonomy records
             for sample_taxonomy_data in update_data['sample_taxonomy_data']:
@@ -1120,13 +1112,7 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
                     sample_taxonomy_data['sample_id'] = sample['id']
 
                 sample_taxonomy_data['taxonomy_id'] = taxonomy_id
-
                 sql, sql_params = get_insert_sql('sample_taxonomy', sample_taxonomy_data)
-                if not new_taxonomy:
-                    existing_sample_taxonomy = get_sample_taxonomy(db_conn, sample_taxonomy_data['sample_id'], taxonomy_id)
-                    if existing_sample_taxonomy is not None:
-                        sql, sql_params = get_update_sql('id', existing_sample_taxonomy['id'], 'sample_taxonomy', sample_taxonomy_data)
-
                 cursor.execute(sql, sql_params)
 
             log.info('Linked ' + str(len(update_data['sample_taxonomy_data'])) + ' samples to taxonomy data ' +
