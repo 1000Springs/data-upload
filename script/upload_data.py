@@ -123,7 +123,7 @@ def find_files(new_files_dir):
     sample_file_re = re.compile('data-samples-[0-9]+\.xls')
     other_xls_file_re = re.compile('.*\.xls')
     thumbsdb_cruft_file_re = re.compile('Thumbs\.db')
-    image_file_re = re.compile('(P1\.\d{4})_([A-Z]*)_\d+\.jpg')
+    image_file_re = re.compile('(P1\.\d{4})_([A-Z]*)_\d+\.jpg', re.IGNORECASE)
     dna_sequence_file_re = re.compile('^.*\.fasta$')
     feature_files = []
     sample_files = []
@@ -1094,7 +1094,12 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
     row_count = 0
     with db_conn:
         cursor = db_conn.cursor()
-
+        # Each update contains the full set of taxonomy data,
+        # so clear out the taxonomy tables before refilling them.
+        # Performed on the same transaction so data not absent
+        # from website for extended period.
+        cursor.execute('delete from sample_taxonomy')
+        cursor.execute('delete from taxonomy')
         for update_data in taxonomy_updates:
             # insert or update taxonomy record
             taxonomy_data =  update_data['taxonomy_data']
