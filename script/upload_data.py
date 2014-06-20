@@ -1420,7 +1420,7 @@ def process_thumbsdb_cruft_files(thumbsdb_cruft_files):
             remove_dir(f)
     except Exception as e:
         log.error('Error removing USB drive temp file')
-        log(e)
+        log.exception(e)
 
 
 def init_logging(config):
