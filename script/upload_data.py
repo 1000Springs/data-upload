@@ -268,6 +268,8 @@ def process_sample_files(db_conn, files_to_process):
                     # SQL uses the MySQL last_insert_id() function to get the
                     # ID of the physical_data record
                     sql, sql_params, sample = get_physical_data_insert_sql(db_conn, row)
+                    log.info(sql)
+                    log.info(sql_params)
                     cursor.execute(sql, sql_params)
                     sql, sql_params = get_sample_insert_sql(db_conn, row, sample)
                     cursor.execute(sql, sql_params)
@@ -412,11 +414,11 @@ def set_water_column_collected(row):
 def set_settled_at_4_deg(row):
     column_name = 'SettledAt4oC'
     if column_name in row:
-        row[column_name] = 1 if row[column_name] == 'true' else 0
+        row[column_name] = 1 if row[column_name].lower() == 'true' else 0
 
 def set_boolean_column(row, column_name, comment_true_re, comment_false_re):
     if column_name in row:
-        row[column_name] = 1 if row[column_name] == 'true' else 0
+        row[column_name] = 1 if row[column_name].lower() == 'true' else 0
     elif comment_true_re.match(row['Comments']):
         row[column_name] = 1
     elif comment_false_re.match(row['Comments']):
