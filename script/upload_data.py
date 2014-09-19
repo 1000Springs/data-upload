@@ -268,8 +268,6 @@ def process_sample_files(db_conn, files_to_process):
                     # SQL uses the MySQL last_insert_id() function to get the
                     # ID of the physical_data record
                     sql, sql_params, sample = get_physical_data_insert_sql(db_conn, row)
-                    log.info(sql)
-                    log.info(sql_params)
                     cursor.execute(sql, sql_params)
                     sql, sql_params = get_sample_insert_sql(db_conn, row, sample)
                     cursor.execute(sql, sql_params)
