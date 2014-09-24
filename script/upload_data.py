@@ -1100,6 +1100,7 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
         # from website for extended period.
         cursor.execute('delete from sample_taxonomy')
         cursor.execute('delete from taxonomy')
+        sample_id_cache={}
         for update_data in taxonomy_updates:
             # insert or update taxonomy record
             taxonomy_data =  update_data['taxonomy_data']
@@ -1108,17 +1109,24 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
             taxonomy_id = db_conn.insert_id()
 
             # insert sample_taxonomy records
+            sql_params = []
             for sample_taxonomy_data in update_data['sample_taxonomy_data']:
                 sample_number = sample_taxonomy_data.pop('sample_number')
-                sample = get_sample(db_conn, sample_number)
-                if sample is None:
-                    sample_taxonomy_data['sample_id'] = insert_dummy_sample(db_conn, cursor, sample_number)
+                if sample_number in sample_id_cache:
+                    sample_id = sample_id_cache[sample_number]
                 else:
-                    sample_taxonomy_data['sample_id'] = sample['id']
+                    sample = get_sample(db_conn, sample_number)
+                    if sample is None:
+                        sample_id = insert_dummy_sample(db_conn, cursor, sample_number)
+                    else:
+                        sample_id = sample['id']
+                    sample_id_cache[sample_number] = sample_id
 
-                sample_taxonomy_data['taxonomy_id'] = taxonomy_id
-                sql, sql_params = get_insert_sql('sample_taxonomy', sample_taxonomy_data)
-                cursor.execute(sql, sql_params)
+                sql_params.extend([sample_id, taxonomy_id, sample_taxonomy_data['read_count']])
+
+
+            sql = 'insert into sample_taxonomy (sample_id,taxonomy_id,read_count) values (%s,%s,%s) ' + (', (%s,%s,%s)' * (len(update_data['sample_taxonomy_data']) - 1))
+            cursor.execute(sql, sql_params)
 
             log.info('Linked ' + str(len(update_data['sample_taxonomy_data'])) + ' samples to taxonomy data ' +
                 taxonomy_data['otu_id'] + ' from ' + taxonomy_data['data_file_name'])
