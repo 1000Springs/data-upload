@@ -1208,10 +1208,12 @@ def get_tablet_data_rows(file_path):
         first_line = f.readline().strip()
         column_names = first_line.split('\t')
         for line in f:
-            row = dict(zip(column_names,line.strip().split('\t')))
-            # Values from files edited in Excel end up with surrounding quotes
-            remove_string_quotes(row)
-            rows.append(row)
+            trimmed_line = line.strip()
+            if len(trimmed_line) > 0:
+                row = dict(zip(column_names,line.strip().split('\t')))
+                # Values from files edited in Excel end up with surrounding quotes
+                remove_string_quotes(row)
+                rows.append(row)
 
     return rows
 
