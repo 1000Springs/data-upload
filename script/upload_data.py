@@ -1061,7 +1061,11 @@ def get_taxonomy_columns(worksheet, header_row_index = 0):
         col_name = str(worksheet.cell_value(header_row_index, col_index))
         sample_number = TAXONOMY_SAMPLE_NUMBER_RE.match(col_name)
         if (sample_number):
-            sample_columns['P1.'+sample_number.group(1)] = col_index
+            sample_key = 'P1.'+sample_number.group(1)
+            if sample_key in sample_columns:
+                log.warn('Column ' + str(col_index) + ' is a duplicate of ' + sample_key + ' at ' + str(sample_columns[sample_key]))
+            else:
+                sample_columns['P1.'+sample_number.group(1)] = col_index
 
         elif col_name in TAXONOMY_COLUMN_MAP:
             taxonomy_columns[TAXONOMY_COLUMN_MAP[col_name]] = col_index
@@ -1109,27 +1113,30 @@ def perform_taxonomy_updates(db_conn, taxonomy_updates):
             taxonomy_id = db_conn.insert_id()
 
             # insert sample_taxonomy records
-            sql_params = []
-            for sample_taxonomy_data in update_data['sample_taxonomy_data']:
-                sample_number = sample_taxonomy_data.pop('sample_number')
-                if sample_number in sample_id_cache:
-                    sample_id = sample_id_cache[sample_number]
-                else:
-                    sample = get_sample(db_conn, sample_number)
-                    if sample is None:
-                        sample_id = insert_dummy_sample(db_conn, cursor, sample_number)
+            if len(update_data['sample_taxonomy_data']) > 0:
+                sql_params = []
+                for sample_taxonomy_data in update_data['sample_taxonomy_data']:
+                    sample_number = sample_taxonomy_data.pop('sample_number')
+                    if sample_number in sample_id_cache:
+                        sample_id = sample_id_cache[sample_number]
                     else:
-                        sample_id = sample['id']
-                    sample_id_cache[sample_number] = sample_id
+                        sample = get_sample(db_conn, sample_number)
+                        if sample is None:
+                            sample_id = insert_dummy_sample(db_conn, cursor, sample_number)
+                        else:
+                            sample_id = sample['id']
+                        sample_id_cache[sample_number] = sample_id
 
-                sql_params.extend([sample_id, taxonomy_id, sample_taxonomy_data['read_count']])
+                    sql_params.extend([sample_id, taxonomy_id, sample_taxonomy_data['read_count']])
 
 
-            sql = 'insert into sample_taxonomy (sample_id,taxonomy_id,read_count) values (%s,%s,%s) ' + (', (%s,%s,%s)' * (len(update_data['sample_taxonomy_data']) - 1))
-            cursor.execute(sql, sql_params)
+                sql = 'insert into sample_taxonomy (sample_id,taxonomy_id,read_count) values (%s,%s,%s) ' + (', (%s,%s,%s)' * (len(update_data['sample_taxonomy_data']) - 1))
+                cursor.execute(sql, sql_params)
+                log.info('Linked ' + str(len(update_data['sample_taxonomy_data'])) + ' samples to taxonomy data ' +
+                    taxonomy_data['otu_id'] + ' from ' + taxonomy_data['data_file_name'])
+            else:
+                log.warn('No samples found with read counts for '+ taxonomy_data['otu_id'])
 
-            log.info('Linked ' + str(len(update_data['sample_taxonomy_data'])) + ' samples to taxonomy data ' +
-                taxonomy_data['otu_id'] + ' from ' + taxonomy_data['data_file_name'])
             # only count the taxonomy updates, as this will match the row count in the spreadsheet
             row_count += 1
 
