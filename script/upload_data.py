@@ -712,12 +712,12 @@ def is_uow_geochem(worksheet):
 
     first_result_row = -1
     first_result_col = -1
-    for i in range(0, worksheet.nrows - 1):
+    for i in range(0, worksheet.nrows):
         if  SAMPLE_NUMBER_RE.match(worksheet.cell_value(i, 0)):
             first_result_row = i
             break
 
-    for i in range(0, worksheet.ncols - 1):
+    for i in range(0, worksheet.ncols):
         element_name = worksheet.cell_value(0, i)
         if  GEOCHEMISTRY_COLUMN_MAP.has_key(element_name):
             first_result_col = i
