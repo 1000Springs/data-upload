@@ -689,7 +689,13 @@ GEOCHEMISTRY_COLUMN_MAP = {
     'S 32': 'S',
     'Rb 85': 'Rb',
     'Cs 133': 'Cs',
-    'Hg 202': 'Hg'
+    'Hg 202': 'Hg',
+
+    # Other
+    'iron2': 'iron2',
+    'H2': 'H2',
+    'CO': 'CO',
+    'CH4': 'CH4'
 }
 
 # Matches 'P1.0023', 'P1-0023', etc
