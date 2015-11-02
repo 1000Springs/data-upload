@@ -1231,7 +1231,7 @@ def clear_caches(host):
 
 def init_caches(host, db_conn):
     init_taxonomy_overview_cache(host, db_conn)
-    #init_taxonomy_summary_cache(host, db_conn)
+    init_taxonomy_summary_cache(host, db_conn)
 
 def init_taxonomy_overview_cache(host, db_conn):
     log.info('Initialising taxonomy overview cache')
