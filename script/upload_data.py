@@ -39,6 +39,7 @@ import re
 import codecs
 import base64
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+import time
 
 import MySQLdb
 from PIL import Image
@@ -46,6 +47,7 @@ from PIL import ExifTags
 from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 import xlrd
+import httplib
 
 log = logging.getLogger('Springs Uploader')
 notification_msg = '1000 Springs data upload results'
@@ -60,7 +62,7 @@ def main():
     try:
         config = load_config('upload_data.cfg')
         log_file = init_logging(config)
-        log.info('upload_tablet_data.py '+str(sys.argv))
+        log.info('upload_data.py '+str(sys.argv))
         db_conn = db_connect(config)
         new_files_dir = get_new_files_dir(config)
 
@@ -93,6 +95,22 @@ def main():
         process_thumbsdb_cruft_files(thumbsdb_cruft_files)
 
         unmount_data_share(config)
+
+        host = config.get('Website', 'host')
+        clear_cache = len(t_files_uploaded) > 0 or (len(sys.argv) > 1 and sys.argv[1].lower() == 'reload')
+        init_cache = clear_cache or len(sys.argv) > 1
+        if clear_cache:
+            clear_caches(host)
+
+        if init_cache:
+            init_caches(host, db_conn)
+            msg = 'Cache reload complete' if clear_caches else 'Cache init complete'
+            send_email(
+                msg,
+                "1000 Springs cache init complete",
+                'cache_refreshed_to_csv',
+                config
+                )
 
     except Exception as e:
         upload_error = True
@@ -1203,6 +1221,51 @@ def update_dna_sequence(cursor, file_name, otu_id, dna_sequence):
     sql = 'update taxonomy set sequence=%s where data_file_name like %s and otu_id=%s'
     cursor.execute(sql, [dna_sequence, file_name + '%', otu_id])
 
+#-------------------------------------------------------------------------------
+# CACHE OPERATIONS
+#-------------------------------------------------------------------------------
+def clear_caches(host):
+    log.info('Clearing caches')
+    http_get(host, '/clearTaxonomyCache')
+    http_get(host, '/clearTaxonomyOverviewCache')
+
+def init_caches(host, db_conn):
+    init_taxonomy_overview_cache(host, db_conn)
+    #init_taxonomy_summary_cache(host, db_conn)
+
+def init_taxonomy_overview_cache(host, db_conn):
+    log.info('Initialising taxonomy overview cache')
+    cursor = db_conn.cursor()
+    domains = get_single_column(db_conn, 'select distinct domain from public_taxonomy order by domain')
+    phylums = get_single_column(db_conn, 'select distinct phylum from public_taxonomy order by phylum')
+
+    for domain in domains:
+        http_get(host, '/overviewTaxonGraphJson/domain/'+domain)
+        time.sleep(1) # sleep for 1 second so the website doesn't fall over
+
+    for phylum in phylums:
+        http_get(host, '/overviewTaxonGraphJson/phylum/'+phylum)
+        time.sleep(1)
+
+def init_taxonomy_summary_cache(host, db_conn):
+    log.info('Initialising taxonomy summary cache')
+    cursor = db_conn.cursor()
+    sample_numbers = get_single_column(db_conn, 'select sample_number from public_sample s order by sample_number')
+    for sample_number in sample_numbers:
+        http_get(host, '/taxonomyJson/'+sample_number)
+        time.sleep(5) # sleep for 5 seconds so the website doesn't fall over
+
+def get_single_column(db_conn, sql):
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        result = [row[0] for row in rows]
+    finally:
+        cursor.close()
+
+    return result
+
 
 #-------------------------------------------------------------------------------
 # UTILITY FUNCTIONS
@@ -1493,6 +1556,12 @@ def db_connect(config):
         charset='utf8',
         sql_mode='STRICT_ALL_TABLES'
         )
+
+def http_get(host, path):
+    log.debug('HTTP get: http://' + host + path)
+    conn = httplib.HTTPConnection(host)
+    conn.request("GET", path)
+    return conn.getresponse()
 
 MOUNT_SECTION = 'DataShare'
 def mount_data_share(config):
