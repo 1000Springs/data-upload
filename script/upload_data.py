@@ -18,6 +18,13 @@
 #
 #              After data upload is completed, an email summarising the record
 #              upload is sent.
+#              
+#              If uploaded data effects the taxonomy overview or summary data
+#              cached on the webserver, the script will reload this cache data
+#              using webserver REST URLs. The cache data can also be updated by
+#              passing a command line arg of either 'fill' (to load the cache) or 
+#              'reload' (to flush then load the cache).
+#               
 #
 #              If an error occurs during processing, a notification email is sent
 #              containing the debug log.
@@ -96,18 +103,27 @@ def main():
 
         unmount_data_share(config)
 
+        # Update taxonomy caches if necessary
         host = config.get('Website', 'host')
-        clear_cache = len(t_files_uploaded) > 0 or (len(sys.argv) > 1 and sys.argv[1].lower() == 'reload')
-        init_cache = clear_cache or len(sys.argv) > 1
-        if clear_cache:
-            clear_caches(host)
+        clear_tax_summary_cache = len(t_files_uploaded) > 0 or (len(sys.argv) > 1 and sys.argv[1].lower() == 'reload')
+        clear_tax_overview_cache = clear_tax_summary_cache or len(s_files_uploaded) > 0
+        fill_caches = len(sys.argv) > 1 and sys.argv[1].lower() == 'fill'
+        
+        if clear_tax_overview_cache:
+            http_get(host, '/clearTaxonomyOverviewCache')   
+        if fill_caches or clear_tax_overview_cache:
+            init_taxonomy_overview_cache(host, db_conn)
+                   
+        if clear_tax_summary_cache:
+            http_get(host, '/clearTaxonomyCache')
+        if fill_caches or clear_tax_summary_cache:
+            init_taxonomy_summary_cache(host, db_conn)     
 
-        if init_cache:
-            init_caches(host, db_conn)
-            msg = 'Cache reload complete' if clear_caches else 'Cache init complete'
+        if clear_tax_overview_cache or clear_tax_summary_cache or fill_caches:
+            msg = 'Cache update complete on '+host 
             send_email(
                 msg,
-                "1000 Springs cache init complete",
+                "1000 Springs cache update complete",
                 'cache_refreshed_to_csv',
                 config
                 )
@@ -1224,24 +1240,18 @@ def update_dna_sequence(cursor, file_name, otu_id, dna_sequence):
 #-------------------------------------------------------------------------------
 # CACHE OPERATIONS
 #-------------------------------------------------------------------------------
-def clear_caches(host):
-    log.info('Clearing caches')
-    http_get(host, '/clearTaxonomyCache')
-    http_get(host, '/clearTaxonomyOverviewCache')
-
 def init_caches(host, db_conn):
     init_taxonomy_overview_cache(host, db_conn)
     init_taxonomy_summary_cache(host, db_conn)
 
 def init_taxonomy_overview_cache(host, db_conn):
     log.info('Initialising taxonomy overview cache')
-    cursor = db_conn.cursor()
     domains = get_single_column(db_conn, 'select distinct domain from public_taxonomy order by domain')
     phylums = get_single_column(db_conn, 'select distinct phylum from public_taxonomy order by phylum')
 
     for domain in domains:
         http_get(host, '/overviewTaxonGraphJson/domain/'+domain)
-        time.sleep(1) # sleep for 1 second so the website doesn't fall over
+        time.sleep(1) # sleep for 1 second to give the DB a breather
 
     for phylum in phylums:
         http_get(host, '/overviewTaxonGraphJson/phylum/'+phylum)
@@ -1249,11 +1259,10 @@ def init_taxonomy_overview_cache(host, db_conn):
 
 def init_taxonomy_summary_cache(host, db_conn):
     log.info('Initialising taxonomy summary cache')
-    cursor = db_conn.cursor()
     sample_numbers = get_single_column(db_conn, 'select sample_number from public_sample s order by sample_number')
     for sample_number in sample_numbers:
         http_get(host, '/taxonomyJson/'+sample_number)
-        time.sleep(5) # sleep for 5 seconds so the website doesn't fall over
+        time.sleep(5) # sleep for 5 seconds to give the DB a breather
 
 def get_single_column(db_conn, sql):
     cursor = db_conn.cursor()
