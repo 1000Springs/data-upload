@@ -18,13 +18,13 @@
 #
 #              After data upload is completed, an email summarising the record
 #              upload is sent.
-#              
+#
 #              If uploaded data effects the taxonomy overview or summary data
 #              cached on the webserver, the script will reload this cache data
 #              using webserver REST URLs. The cache data can also be updated by
-#              passing a command line arg of either 'fill' (to load the cache) or 
+#              passing a command line arg of either 'fill' (to load the cache) or
 #              'reload' (to flush then load the cache).
-#               
+#
 #
 #              If an error occurs during processing, a notification email is sent
 #              containing the debug log.
@@ -108,19 +108,19 @@ def main():
         clear_tax_summary_cache = len(t_files_uploaded) > 0 or (len(sys.argv) > 1 and sys.argv[1].lower() == 'reload')
         clear_tax_overview_cache = clear_tax_summary_cache or len(s_files_uploaded) > 0
         fill_caches = len(sys.argv) > 1 and sys.argv[1].lower() == 'fill'
-        
+
         if clear_tax_overview_cache:
-            http_get(host, '/clearTaxonomyOverviewCache')   
+            http_get(host, '/clearTaxonomyOverviewCache')
         if fill_caches or clear_tax_overview_cache:
             init_taxonomy_overview_cache(host, db_conn)
-                   
+
         if clear_tax_summary_cache:
             http_get(host, '/clearTaxonomyCache')
         if fill_caches or clear_tax_summary_cache:
-            init_taxonomy_summary_cache(host, db_conn)     
+            init_taxonomy_summary_cache(host, db_conn)
 
         if clear_tax_overview_cache or clear_tax_summary_cache or fill_caches:
-            msg = 'Cache update complete on '+host 
+            msg = 'Cache update complete on '+host
             send_email(
                 msg,
                 "1000 Springs cache update complete",
@@ -729,7 +729,12 @@ GEOCHEMISTRY_COLUMN_MAP = {
     'iron2': 'iron2',
     'H2': 'H2',
     'CO': 'CO',
-    'CH4': 'CH4'
+    'CH4': 'CH4',
+
+    # antimony and re-tested arsenic value, requested by Jean
+    'As2': 'As2',
+    'Sb': 'Sb'
+
 }
 
 # Matches 'P1.0023', 'P1-0023', etc
